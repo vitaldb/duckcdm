@@ -102,36 +102,52 @@ PARTITION_DATE = {
 }
 
 
-def export_parquet(con, schema, outdir, tables=None, row_group_size=122880, log=print):
-    """Write schema.<table> (views or tables) to outdir/<table>/[year=Y/]data.parquet, sorted by SORT_KEYS.
-    Large event tables are written one year at a time (bounded memory); other tables as a single file."""
+def export_parquet(con, schema, outdir, tables=None, row_group_size=122880, max_rows=100_000_000, log=print):
+    """Write schema.<table> (views or tables) to outdir/<table>/[year=Y/]*.parquet, sorted by SORT_KEYS.
+    Large event tables are written one year at a time (bounded memory), and a year with more than
+    max_rows rows one month at a time. Files that already exist are kept, so an interrupted export
+    can be rerun to finish it."""
     import time
     os.makedirs(outdir, exist_ok=True)
     have = {r[0] for r in con.execute(
         'select table_name from information_schema.tables where table_schema = ?', [schema]).fetchall()}
+    opts = f"(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {int(row_group_size)})"
+
+    def write(select, path):
+        if os.path.exists(path):
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        con.execute(f"COPY ({select}) TO '{path}.tmp' {opts}")
+        os.replace(path + '.tmp', path)
+
     for table in (tables or list(cdm_fields())):
         if table not in have:
-            continue
-        n = con.execute(f'SELECT count(*) FROM {schema}.{table}').fetchone()[0]
-        if n == 0:
             continue
         t0 = time.time()
         order = ', '.join(SORT_KEYS.get(table, [])) or '1'
         tdir = os.path.join(outdir, table)
-        os.makedirs(tdir, exist_ok=True)
-        opts = f"(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {int(row_group_size)})"
+        src = f'SELECT * FROM {schema}.{table}'
         date = PARTITION_DATE.get(table)
         if date:
-            years = [r[0] for r in con.execute(
-                f'SELECT DISTINCT year({date}) FROM {schema}.{table} ORDER BY 1').fetchall()]
-            for y in years:
-                ydir = os.path.join(tdir, f'year={y if y is not None else "__null__"}')
-                os.makedirs(ydir, exist_ok=True)
-                cond = f'year({date}) = {int(y)}' if y is not None else f'{date} IS NULL'
-                con.execute(f"COPY (SELECT * FROM {schema}.{table} WHERE {cond} ORDER BY {order}) "
-                            f"TO '{os.path.join(ydir, 'data.parquet')}' {opts}")
+            years = con.execute(f'SELECT year({date}), count(*) FROM {schema}.{table} GROUP BY 1 ORDER BY 1').fetchall()
+            n = sum(c for _, c in years)
+            for y, c in years:
+                if y is None:
+                    write(f'{src} WHERE {date} IS NULL ORDER BY {order}',
+                          os.path.join(tdir, 'year=__null__', 'data.parquet'))
+                elif c <= max_rows:
+                    write(f'{src} WHERE year({date}) = {int(y)} ORDER BY {order}',
+                          os.path.join(tdir, f'year={int(y)}', 'data.parquet'))
+                else:
+                    for m in range(1, 13):
+                        write(f'{src} WHERE {date} >= DATE \'{int(y)}-{m:02d}-01\' '
+                              f'AND {date} < DATE \'{int(y) + m // 12}-{m % 12 + 1:02d}-01\' ORDER BY {order}',
+                              os.path.join(tdir, f'year={int(y)}', f'month{m:02d}.parquet'))
         else:
-            con.execute(f"COPY (SELECT * FROM {schema}.{table} ORDER BY {order}) "
-                        f"TO '{os.path.join(tdir, 'data.parquet')}' {opts}")
+            n = con.execute(f'SELECT count(*) FROM {schema}.{table}').fetchone()[0]
+            if n:
+                write(f'{src} ORDER BY {order}', os.path.join(tdir, 'data.parquet'))
+        if n == 0:
+            continue
         if log:
             log(f'  {table:<24} {n:>14,} rows  {time.time() - t0:7.0f}s')

@@ -124,6 +124,7 @@ def main(argv=None):
         if a.threads:
             con.execute(f'SET threads = {int(a.threads)}')
         con.execute('SET preserve_insertion_order = false')
+        con.execute(f"SET temp_directory = '{os.path.abspath(a.outdir)}.tmp'")   # sorts spill to disk
         export_parquet(con, a.schema, os.path.abspath(a.outdir),
                        [t for t in a.tables.split(',') if t] or None, log=lambda m: print(m, flush=True))
         return 0
