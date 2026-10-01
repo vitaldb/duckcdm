@@ -135,7 +135,7 @@ def export_parquet(con, schema, outdir, tables=None, row_group_size=122880, max_
                 if y is None:
                     write(f'{src} WHERE {date} IS NULL ORDER BY {order}',
                           os.path.join(tdir, 'year=__null__', 'data.parquet'))
-                elif c <= max_rows:
+                elif c <= max_rows or os.path.exists(os.path.join(tdir, f'year={int(y)}', 'data.parquet')):
                     write(f'{src} WHERE year({date}) = {int(y)} ORDER BY {order}',
                           os.path.join(tdir, f'year={int(y)}', 'data.parquet'))
                 else:
