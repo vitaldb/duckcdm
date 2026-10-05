@@ -39,6 +39,8 @@ def main(argv=None):
     vw.add_argument('--schema', default='main')
     vw.add_argument('--materialize', action='store_true',
                     help='copy into native DuckDB tables instead of views (much faster queries; uses disk)')
+    vw.add_argument('--results-parquet', help='folder written by "duckcdm achilles --export": add results-schema views over it')
+    vw.add_argument('--results', default='results', help='Results schema for --results-parquet (default results)')
     vw.add_argument('--memory-limit', default=None, help='DuckDB memory_limit (e.g. 8GB)')
     vw.add_argument('--threads', type=int, default=None, help='DuckDB threads')
     ex = sub.add_parser('export-parquet', help='write a CDM (DuckDB views or tables) to sorted, year-partitioned Parquet')
@@ -58,6 +60,7 @@ def main(argv=None):
     ac.add_argument('--resume', action='store_true',
                     help='keep analyses finished by an interrupted run (their scratch tables) and run only the rest')
     ac.add_argument('--skip', default='', help='comma-separated analysis ids to leave out')
+    ac.add_argument('--export', help='also write the report tables to this folder as Parquet (for "views --results-parquet")')
     ac.add_argument('--small-cell', type=int, default=5, help='Remove cells with counts at or below this (Achilles default 5)')
     c = sub.add_parser('cohort', help='Cohort definition (ATLAS/Circe JSON) -> target dialect SQL')
     c.add_argument('file', help="Cohort JSON ('-' for stdin)")
@@ -113,6 +116,9 @@ def main(argv=None):
         con.execute('SET preserve_insertion_order = false')
         create_parquet_views(con, os.path.abspath(a.parquet_dir), a.schema,
                              log=lambda m: print(m, flush=True), materialize=a.materialize)
+        if a.results_parquet:
+            from .omop import create_results_views
+            create_results_views(con, os.path.abspath(a.results_parquet), a.results, log=lambda m: print(m, flush=True))
         con.close()
         return 0
     if a.cmd == 'export-parquet':
@@ -139,6 +145,11 @@ def main(argv=None):
         skip = {int(x) for x in a.skip.split(',') if x.strip()}
         done, failed = Reports(src).build(log=lambda m: print(m, flush=True), resume=a.resume, skip=skip)
         print(f'{len(done)} analyses, {len(failed)} failed, {time.time() - t0:.1f}s')
+        if a.export and not failed:
+            from .omop import export_results
+            with src.lock:
+                export_results(src.cursor(), a.results, os.path.abspath(a.export))
+            print(f'exported to {a.export}')
         for aid, err in failed:
             print('  FAILED', aid, err)
         return 1 if failed else 0

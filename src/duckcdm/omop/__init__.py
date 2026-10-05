@@ -72,6 +72,38 @@ def create_parquet_views(con, root, schema='main', versions=('5.4', '5.3'), log=
     return excluded
 
 
+# Results-schema tables the data-source reports read (written by `duckcdm achilles`).
+ACHILLES_TABLES = ('achilles_results', 'achilles_results_dist', 'achilles_analysis',
+                   'achilles_result_concept_count', 'concept_hierarchy')
+
+
+def export_results(con, schema, outdir, tables=ACHILLES_TABLES):
+    """Write schema.<table> to outdir/<table>.parquet. Written to outdir.new and swapped in, so readers
+    (views over outdir) see either the old or the new set."""
+    import shutil
+    new, old = outdir + '.new', outdir + '.old'
+    shutil.rmtree(new, ignore_errors=True)
+    os.makedirs(new)
+    for t in tables:
+        con.execute(f"COPY {schema}.{t} TO '{os.path.join(new, t + '.parquet')}' (FORMAT parquet, COMPRESSION zstd)")
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.exists(outdir):
+        os.rename(outdir, old)
+    os.rename(new, outdir)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def create_results_views(con, indir, schema='results', log=print):
+    """indir/<table>.parquet (from export_results) -> views schema.<table>."""
+    con.execute(f'CREATE SCHEMA IF NOT EXISTS {schema}')
+    for t in ACHILLES_TABLES:
+        f = os.path.join(indir, t + '.parquet')
+        if os.path.exists(f):
+            con.execute(f"CREATE OR REPLACE VIEW {schema}.{t} AS SELECT * FROM read_parquet('{f}')")
+            if log:
+                log(f'  {schema}.{t:<30} view')
+
+
 def safe_name(s):
     return re.sub(r'[^A-Za-z0-9_]', '_', s)
 

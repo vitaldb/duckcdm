@@ -149,7 +149,8 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     @app.get('/WebAPI/vocabulary/{key}/info')
     def vocab_info(key):
         rows = vocab(key, 'getInfo.sql')
-        return {'version': rows[0]['VOCABULARY_VERSION'] if rows else 'unknown', 'dialect': 'duckdb'}
+        row = {k.upper(): v for k, v in rows[0].items()} if rows else {}
+        return {'version': row.get('VOCABULARY_VERSION') or 'unknown', 'dialect': 'duckdb'}
 
     @app.get('/WebAPI/vocabulary/{key}/domains')
     def domains(key):
