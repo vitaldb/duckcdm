@@ -2,6 +2,7 @@
 
 Paths are the same as WebAPI (under /WebAPI/...). The UI (ATLAS 3.0 build) is served alongside at /.
 """
+import contextvars
 import json
 import os
 import threading
@@ -483,6 +484,11 @@ def create_app(sources, store, title='duckcdm', gateway=None):
         t0 = time.time()
         c = store.get_cohort(cid)
         try:
+            try:
+                from .remote import purpose_text      # remote sources say what each query is for
+                purpose_text.set(f"CDM ATLAS 코호트 생성 — '{c.get('name') or cid}' (cohort {cid})")
+            except ImportError:
+                pass
             expr = json.loads(c['expression'])
             sql = build_cohort_query(expr, cdm_schema=s.cdm_schema, vocabulary_schema=s.vocab_schema,
                                      result_schema=s.results_schema, target_table=s.results_schema + '.cohort',
@@ -494,8 +500,11 @@ def create_app(sources, store, title='duckcdm', gateway=None):
                     cur.execute(f'INSERT INTO {s.results_schema}.cohort_inclusion VALUES (?, NULL, ?, ?, ?)',
                                 [cid, i, (rule.get('name') or '')[:255], (rule.get('description') or '')[:1000]])
                 s.execute_script(render(sql), cur)
-                pc, rc = cur.execute(f'SELECT count(distinct subject_id), count(*) FROM {s.results_schema}.cohort '
-                                     'WHERE cohort_definition_id = ?', [cid]).fetchone()
+                if hasattr(s, 'generated_counts'):      # remote source: the cohort rows stay remote, counts come back
+                    pc, rc = s.generated_counts(cid)
+                else:
+                    pc, rc = cur.execute(f'SELECT count(distinct subject_id), count(*) FROM {s.results_schema}.cohort '
+                                         'WHERE cohort_definition_id = ?', [cid]).fetchone()
             store.set_generation(cid, s.source_id, status='COMPLETE', is_valid=True,
                                  execution_duration=int((time.time() - t0) * 1000), person_count=pc, record_count=rc,
                                  fail_message=None)
@@ -516,7 +525,8 @@ def create_app(sources, store, title='duckcdm', gateway=None):
                                                  'jobAuthor': store.user['login']})
         store.set_generation(cid, s.source_id, start_time=now_ms(), status='RUNNING', is_valid=False,
                              is_canceled=False, fail_message=None, person_count=None, record_count=None)
-        threading.Thread(target=run_generation, args=(cid, s, jid), daemon=True).start()
+        # copy_context: the generation thread keeps this request's viewer identity (remote sources query as the viewer)
+        threading.Thread(target=contextvars.copy_context().run, args=(run_generation, cid, s, jid), daemon=True).start()
         return store.job(jid)
 
     @app.get('/WebAPI/cohortdefinition/{cid}/cancel/{key}')

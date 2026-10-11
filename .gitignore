@@ -2,3 +2,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.venv/
+deploy/cdm-atlas/wheels/
+deploy/cdm-atlas/probe_*.json
