@@ -87,11 +87,14 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     # ---- basic info --------------------------------------------------------------
     @app.get('/WebAPI/info')
     def info():
-        return {'version': '3.0.0', 'buildInfo': {'artifactVersion': 'duckcdm ' + __version__, 'branch': 'main',
+        build = os.environ.get('WEBAPI_BUILD_NAME')     # deployments that do not name the engine (e.g. 'WebAPI 3.0')
+        conf = {'security': {'enabled': False}, 'vocabulary': {'solr': {'enabled': False}},
+                'person': {'viewDatesPermitted': True}, 'plp': {'enabled': False}, 'heracles': {'smallCellCount': 5}}
+        if not build:
+            conf['duckcdm'] = {'version': __version__}
+        return {'version': '3.0.0', 'buildInfo': {'artifactVersion': build or 'duckcdm ' + __version__, 'branch': 'main',
                                                   'commitId': '', 'buildTimestamp': ''},
-                'configuration': {'security': {'enabled': False}, 'vocabulary': {'solr': {'enabled': False}},
-                                  'person': {'viewDatesPermitted': True}, 'plp': {'enabled': False},
-                                  'heracles': {'smallCellCount': 5}, 'duckcdm': {'version': __version__}}}
+                'configuration': conf}
 
     @app.get('/WebAPI/user/me')
     def user_me(request: Request):

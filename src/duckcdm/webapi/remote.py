@@ -19,6 +19,7 @@ Configuration (environment):
   DF_PURPOSE        purpose sent with each query (default RESEARCH)
   DF_REQUEST_TEXT   default request_text (what is looked up and why); cohort generation names the cohort
   DF_TIMEOUT_MS     per-query timeout (default 600000)
+  SOURCE_DIALECT_LABEL  dialect ATLAS shows for the source (display only)
 """
 import contextvars
 import datetime
@@ -48,7 +49,9 @@ DEFAULT_TEXT = os.environ.get('DF_REQUEST_TEXT', 'CDM ATLAS(OHDSI) — OMOP CDM 
 
 
 class RemoteError(Exception):
-    pass
+    def __init__(self, msg):
+        # messages reach the ATLAS screen (generation failure); they need not name the engine
+        super().__init__(re.sub(r'(?i)duck\s*db', 'SQL engine', str(msg)))
 
 
 _DATE = re.compile(r'\d{4}-\d{2}-\d{2}$')
@@ -224,6 +227,13 @@ class RemoteSource(Source):
 
     def generated_counts(self, cid):
         return self.counts.get(cid, (0, 0))
+
+    def info(self):
+        d = super().info()
+        label = os.environ.get('SOURCE_DIALECT_LABEL')   # what ATLAS shows as the source dialect (queries still run as duckdb)
+        if label:
+            d['sourceDialect'] = label
+        return d
 
     def details(self):
         d = self.info()
