@@ -9,7 +9,8 @@ A layer on top of the local Source — nothing else changes:
 - Optional year filter (DF_REQUIRE_YEAR=1): the API currently refuses partitioned tables without a filter on
   `year`, so every reference to such a table becomes (SELECT * FROM t WHERE year >= 0). Turn it off when the
   platform no longer requires it — no code change.
-- The viewer's identity (gateway headers) is passed through, so the API applies that user's grants and audit.
+- The viewer's identity is passed through (the gateway's user token X-App-User-Token, else User-ID headers),
+  so the API applies that user's permissions and audit.
 
 Configuration (environment):
   DF_URL            query endpoint (default: in-cluster Data Foundation)
@@ -77,7 +78,9 @@ def install_identity(app):
     async def _identity(request, call_next):
         h = request.headers
         uid = h.get('x-auth-user-id') or h.get('user-id') or h.get('x-auth-subject')
-        tok = identity.set({'user_id': uid, 'authorities': h.get('x-auth-authorities') or ''} if uid else None)
+        # 2026-10-12~ the API takes the gateway's short-lived user token (X-App-User-Token, ~5 min) instead of bare User-ID
+        tok = identity.set({'user_id': uid, 'authorities': h.get('x-auth-authorities') or '',
+                            'token': h.get('x-app-user-token')} if uid else None)
         try:
             return await call_next(request)
         finally:
@@ -151,8 +154,12 @@ class RemoteSource(Source):
             sql = year_filter(sql, self.dataset, self.flat)
         body = {'sql': sql, 'limit': 50000, 'timeout_ms': self.timeout_ms, 'purpose': self.purpose,
                 'request_text': purpose_text.get() or DEFAULT_TEXT}
-        req = urllib.request.Request(self.url, json.dumps(body).encode(), {
-            'Content-Type': 'application/json', 'User-ID': who['user_id'], 'User-Authorities': who['authorities']})
+        hdr = {'Content-Type': 'application/json'}
+        if who.get('token'):
+            hdr['X-App-User-Token'] = who['token']
+        else:
+            hdr.update({'User-ID': who['user_id'], 'User-Authorities': who['authorities']})
+        req = urllib.request.Request(self.url, json.dumps(body).encode(), hdr)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000 + 60) as r:
                 j = json.loads(r.read())
