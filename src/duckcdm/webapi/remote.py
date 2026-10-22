@@ -9,15 +9,20 @@ A layer on top of the local Source — nothing else changes:
 - Optional year filter (DF_REQUIRE_YEAR=1): the API currently refuses partitioned tables without a filter on
   `year`, so every reference to such a table becomes (SELECT * FROM t WHERE year >= 0). Turn it off when the
   platform no longer requires it — no code change.
-- The viewer's identity is passed through (the gateway's user token X-App-User-Token, else User-ID headers),
-  so the API applies that user's permissions and audit.
+- Whose permissions decide (DF_AUTH):
+  user  the viewer's identity is passed through (the gateway's user token X-App-User-Token, else User-ID
+        headers), so the API applies that user's permissions and audit.
+  app   the app's own token (X-App-Token from APP_CLIENT_ID/APP_CLIENT_SECRET): whoever opens the app sees what
+        the app may read, without a grant on the dataset of their own. The viewer is still required and each
+        remote query is logged with the viewer's ID, since the API's audit then names only the app.
 
 Configuration (environment):
-  DF_URL            query endpoint (default: in-cluster Data Foundation)
+  DF_URL            query endpoint (default: APP_TABLES_URL/v1/query, else in-cluster Data Foundation)
+  DF_AUTH           user | app (default user)
   DF_DATASET        dataset holding CDM, vocabulary and Achilles tables (default snuh_cdm)
   DF_REQUIRE_YEAR   1 = add the year filter (default 1)
   DF_FLAT_TABLES    comma-separated tables without a year partition (no filter added)
-  DF_PURPOSE        purpose sent with each query (default RESEARCH)
+  DF_PURPOSE        purpose sent with each query (default RESEARCH; empty = not sent, the dataset binding decides)
   DF_REQUEST_TEXT   default request_text (what is looked up and why); cohort generation names the cohort
   DF_TIMEOUT_MS     per-query timeout (default 600000)
   SOURCE_DIALECT_LABEL  dialect ATLAS shows for the source (display only)
@@ -38,7 +43,8 @@ from ..fold import fold
 from ..sqlrender import render, split_sql, translate
 from .sources import Source
 
-DF_URL = os.environ.get('DF_URL', 'http://datafoundation.platform.svc.cluster.local:8787/datafoundation/v1/query')
+DF_URL = os.environ.get('DF_URL') or (os.environ['APP_TABLES_URL'].rstrip('/') + '/v1/query' if os.environ.get('APP_TABLES_URL')
+                                      else 'http://datafoundation.platform.svc.cluster.local:8787/datafoundation/v1/query')
 FLAT_DEFAULT = ('care_site,concept_class,death,domain,location,provider,relationship,source_to_concept_map,vocabulary')
 LOCAL_TABLES = ('cohort', 'cohort_inclusion', 'cohort_inclusion_result', 'cohort_inclusion_stats',
                 'cohort_summary_stats', 'cohort_censor_stats')
@@ -54,6 +60,30 @@ class RemoteError(Exception):
     def __init__(self, msg):
         # messages reach the ATLAS screen (generation failure); they need not name the engine
         super().__init__(re.sub(r'(?i)duck\s*db', 'SQL engine', str(msg)))
+
+
+class AppToken:
+    """The app's own token (platform app auth), kept in memory and renewed before it expires or when refused."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.token, self.until = None, 0
+
+    def get(self, renew=False):
+        with self.lock:
+            if renew or not self.token or time.time() > self.until:
+                url = os.environ['APP_PLATFORM_URL'].rstrip('/') + '/internal/app-auth/token'
+                body = json.dumps({'app_id': os.environ['APP_CLIENT_ID'], 'app_secret': os.environ['APP_CLIENT_SECRET']})
+                req = urllib.request.Request(url, body.encode(), {'Content-Type': 'application/json'})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        j = json.loads(r.read())
+                except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                    raise RemoteError(f'app token not issued: {getattr(e, "code", "")} {getattr(e, "reason", e)}')
+                self.token, self.until = j['token'], time.time() + int(j.get('expires_in') or 3600) - 120
+            return self.token
+
+
+app_token = AppToken()
 
 
 _DATE = re.compile(r'\d{4}-\d{2}-\d{2}$')
@@ -137,6 +167,7 @@ class RemoteSource(Source):
         self.require_year = os.environ.get('DF_REQUIRE_YEAR', '1') == '1'
         self.flat = {t.strip().lower() for t in os.environ.get('DF_FLAT_TABLES', FLAT_DEFAULT).split(',') if t.strip()}
         self.purpose = os.environ.get('DF_PURPOSE', 'RESEARCH')
+        self.app_auth = os.environ.get('DF_AUTH', 'user') == 'app'
         self.timeout_ms = int(os.environ.get('DF_TIMEOUT_MS', '600000'))
         self.counts = {}            # cohort_definition_id -> (persons, records) of the last remote generation
         super().__init__(source_id, key, name, ':memory:', self.dataset, self.dataset, self.dataset)
@@ -144,7 +175,7 @@ class RemoteSource(Source):
 
     # -- remote calls
     def remote(self, sql):
-        """Run one SELECT remotely as the current viewer. Returns (columns, rows)."""
+        """Run one SELECT remotely for the current viewer (with the viewer's or the app's permissions). Returns (columns, rows)."""
         who = identity.get()
         if not who:
             raise RemoteError('no viewer identity — remote queries run with the gateway user headers')
@@ -153,30 +184,46 @@ class RemoteSource(Source):
             sql = f'SELECT * FROM (\n{sql}\n) AS _q'
         if self.require_year:
             sql = year_filter(sql, self.dataset, self.flat)
-        body = {'sql': sql, 'limit': 50000, 'timeout_ms': self.timeout_ms, 'purpose': self.purpose,
-                'request_text': purpose_text.get() or DEFAULT_TEXT}
-        hdr = {'Content-Type': 'application/json'}
-        if who.get('token'):
-            hdr['X-App-User-Token'] = who['token']
-        else:
-            hdr.update({'User-ID': who['user_id'], 'User-Authorities': who['authorities']})
-        req = urllib.request.Request(self.url, json.dumps(body).encode(), hdr)
-        for wait in (2, 4, 8, None):     # the API's in-cluster service refuses connections for a minute or two at times
+        text = purpose_text.get() or DEFAULT_TEXT
+        if self.app_auth:              # the API's audit names the app; the viewer goes into the audited request_text
+            text = f"{text} (조회자 {who['user_id']})"
+            print(f"[query] user={who['user_id']} text={text[:200]!r}", flush=True)
+        body = {'sql': sql, 'limit': 50000, 'timeout_ms': self.timeout_ms, 'request_text': text}
+        if self.purpose:
+            body['purpose'] = self.purpose
+        for attempt in (0, 1):
+            hdr = {'Content-Type': 'application/json'}
+            if self.app_auth:
+                hdr['X-App-Token'] = app_token.get(renew=attempt > 0)
+            elif who.get('token'):
+                hdr['X-App-User-Token'] = who['token']
+            else:
+                hdr.update({'User-ID': who['user_id'], 'User-Authorities': who['authorities']})
+            req = urllib.request.Request(self.url, json.dumps(body).encode(), hdr)
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000 + 60) as r:
-                    j = json.loads(r.read())
+                j = self._send(req)
                 break
             except urllib.error.HTTPError as e:
+                if e.code == 401 and self.app_auth and attempt == 0:     # app token refused: renew once
+                    continue
                 raise RemoteError(f'{e.code} {e.read().decode("utf-8", "replace")[:500]}')
-            except urllib.error.URLError as e:
-                if wait is None or not isinstance(e.reason, (ConnectionRefusedError, ConnectionResetError)):
-                    raise RemoteError(f'Data Foundation API unreachable: {e.reason}')
-                time.sleep(wait)
         if j.get('state') != 'succeeded':
             raise RemoteError(f"{j.get('state')}: {j.get('error') or j.get('rationale') or j.get('decision')}")
         data = j.get('data') or []
         cols = [c['name'] if isinstance(c, dict) else c for c in (j.get('columns') or [])] or (list(data[0]) if data else [])
         return cols, [tuple(_value(r.get(c)) for c in cols) for r in data]
+
+    def _send(self, req):
+        for wait in (2, 4, 8, None):     # the API's in-cluster service refuses connections for a minute or two at times
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000 + 60) as r:
+                    return json.loads(r.read())
+            except urllib.error.URLError as e:
+                if isinstance(e, urllib.error.HTTPError):
+                    raise
+                if wait is None or not isinstance(e.reason, (ConnectionRefusedError, ConnectionResetError)):
+                    raise RemoteError(f'Data Foundation API unreachable: {e.reason}')
+                time.sleep(wait)
 
     def _is_local(self, sql):
         low = sql.lower()

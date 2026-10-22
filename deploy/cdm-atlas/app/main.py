@@ -1,7 +1,8 @@
 """CDM ATLAS — OHDSI ATLAS 3.0 + WebAPI on the snuh.ai app platform (python-web, ASGI).
 
-The CDM is read from the Data Foundation Tables dataset (DF_DATASET, default snuh_cdm) as the viewing user:
-the gateway identity headers are passed through, so the dataset grants decide who sees what.
+The CDM is read from the Data Foundation Tables dataset (DF_DATASET, default snuh_cdm) with the app's own
+permissions (DF_AUTH=app, the platform app token): viewers see counts without a grant on snuh_cdm of their own,
+and each query is logged with the viewer's ID.
 Cohort generation is folded into one SELECT and run there (duckcdm.webapi.remote). The app keeps no data
 of its own: concept sets and cohort definitions live in /tmp (lost when the pod restarts — export them as
 JSON from ATLAS), cohort results are recomputed by generating again.
@@ -12,6 +13,9 @@ import os
 os.environ.setdefault('WEBAPI_BUILD_NAME', 'WebAPI 3.0')
 os.environ.setdefault('SOURCE_DIALECT_LABEL', 'postgresql')
 os.environ.setdefault('SMALL_CELL_MIN', '10')         # counts 1..9 are shown as "<10" (사용자 결정 2026-10-23)
+os.environ.setdefault('DF_AUTH', 'app')               # 앱 권한으로 조회 (사용자 결정 2026-10-23)
+# 앱 권한 + RESEARCH 는 scope-gate LLM 이 막는다(llm_unavailable, 2026-10-23) — purpose 없이 데이터셋 바인딩에 맡긴다
+os.environ.setdefault('DF_PURPOSE', '')
 
 from fastapi.responses import PlainTextResponse
 
