@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..circe import CirceError, build_cohort_query, build_concept_set_query
 from ..sqlrender import render, translate
+from . import cells
 from .reports import Reports
 from .sources import Source, like_text, q, q_in, sql_resource
 from .store import Store, now_ms
@@ -279,7 +280,7 @@ def create_app(sources, store, title='duckcdm', gateway=None):
             f'select concept_id, record_count, descendant_record_count, person_count, descendant_person_count '
             f'from {s.results_schema}.achilles_result_concept_count where concept_id in ({",".join(map(str, ids))})'
         ).fetchall()
-        return [{str(r[0]): [int(x or 0) for x in r[1:]]} for r in rows]
+        return [{str(r[0]): [cells.mask(int(x or 0)) for x in r[1:]]} for r in rows]
 
     # ---- data source reports (Achilles) ------------------------------------------
     def rep(key):
@@ -539,7 +540,8 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     @app.get('/WebAPI/cohortdefinition/{cid}/info')
     def generation_info(cid: int):
         get_cohort(cid)
-        return store.generation_info(cid)
+        return [dict(g, personCount=cells.mask(g['personCount']), recordCount=cells.mask(g['recordCount']))
+                for g in store.generation_info(cid)]
 
     @app.get('/WebAPI/cohortdefinition/{cid}/report/{key}/inclusion')
     @app.get('/WebAPI/cohortdefinition/{cid}/report/{key}')
@@ -551,14 +553,15 @@ def create_app(sources, store, title='duckcdm', gateway=None):
                           f'left join {rs}.cohort_censor_stats cc on cc.cohort_definition_id = cs.cohort_definition_id '
                           'where cs.cohort_definition_id = ? and cs.mode_id = ?', [cid, mode]).fetchone()
         base, final, lost = row if row else (0, 0, 0)
-        pct = lambda n, d: '%.2f%%' % (100.0 * n / d) if d else '0.00%'
+        hide = cells.small(base) or cells.small(final)
+        pct = lambda n, d: '—' if hide or cells.small(n) or cells.small(d - n) else ('%.2f%%' % (100.0 * n / d) if d else '0.00%')
         stats = []
         for seq, name, pcount, gain, total in cur.execute(
                 f'select i.rule_sequence, i.name, s.person_count, s.gain_count, s.person_total from {rs}.cohort_inclusion i '
                 f'join {rs}.cohort_inclusion_stats s on i.cohort_definition_id = s.cohort_definition_id and '
                 'i.rule_sequence = s.rule_sequence where i.cohort_definition_id = ? and mode_id = ? '
                 'order by i.rule_sequence', [cid, mode]).fetchall():
-            stats.append({'id': seq, 'name': name, 'countSatisfying': pcount,
+            stats.append({'id': seq, 'name': name, 'countSatisfying': cells.mask(pcount),
                           'percentSatisfying': pct(pcount, total), 'percentExcluded': pct(total - pcount, total)})
         groups = {}
         for mask, n in cur.execute(f'select inclusion_rule_mask, person_count from {rs}.cohort_inclusion_result '
@@ -568,7 +571,9 @@ def create_app(sources, store, title='duckcdm', gateway=None):
         children = [{'name': 'Group %d' % k, 'children': [
             {'name': ''.join('1' if m >> i & 1 else '0' for i in range(nrules)), 'size': n} for m, n in groups[k]]}
             for k in sorted(groups, reverse=True)]
-        return {'summary': {'baseCount': base, 'finalCount': final, 'lostCount': lost,
+        if any(cells.small(n) for g in groups.values() for _, n in g):
+            children = []               # the treemap would show the small group sizes; the page falls back to rule counts
+        return {'summary': {'baseCount': cells.mask(base), 'finalCount': cells.mask(final), 'lostCount': cells.mask(lost),
                             'percentMatched': pct(final, base)},
                 'inclusionRuleStats': stats, 'treemapData': json.dumps({'name': 'Everyone', 'children': children})}
 
@@ -608,6 +613,10 @@ def create_app(sources, store, title='duckcdm', gateway=None):
         return j
 
     # ---- UI ----------------------------------------------------------------------
+    @app.get('/cells.js')
+    def cells_js():
+        return Response(cells.page_js(), media_type='application/javascript', headers={'Cache-Control': 'no-cache'})
+
     @app.get('/config-local.json')
     def config_local():
         return {'api': {'url': './WebAPI'}, 'userAuthenticationEnabled': False, 'enableSkipLogin': True,

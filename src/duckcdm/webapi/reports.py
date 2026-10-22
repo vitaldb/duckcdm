@@ -5,6 +5,7 @@ import os
 
 from ..achilles import run_achilles
 from ..sqlrender import render
+from . import cells
 from .sources import sql_resource
 
 _DIR = os.path.join(os.path.dirname(__file__), 'sql', 'cdmresults')
@@ -145,7 +146,7 @@ class Reports:
                       cdm_database_schema=s.cdm_schema)
         if concept_id is not None:
             params['conceptId'] = int(concept_id)
-        return s.query_dicts(sql, **params)
+        return [r for r in s.query_dicts(sql, **params) if cells.row_ok(r)]
 
     def _bundle(self, spec):
         return {key: [MAPPERS[m](r) for r in self._rows(rel)] for key, rel, m in spec}

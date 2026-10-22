@@ -28,6 +28,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -160,11 +161,17 @@ class RemoteSource(Source):
         else:
             hdr.update({'User-ID': who['user_id'], 'User-Authorities': who['authorities']})
         req = urllib.request.Request(self.url, json.dumps(body).encode(), hdr)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000 + 60) as r:
-                j = json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            raise RemoteError(f'{e.code} {e.read().decode("utf-8", "replace")[:500]}')
+        for wait in (2, 4, 8, None):     # the API's in-cluster service refuses connections for a minute or two at times
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000 + 60) as r:
+                    j = json.loads(r.read())
+                break
+            except urllib.error.HTTPError as e:
+                raise RemoteError(f'{e.code} {e.read().decode("utf-8", "replace")[:500]}')
+            except urllib.error.URLError as e:
+                if wait is None or not isinstance(e.reason, (ConnectionRefusedError, ConnectionResetError)):
+                    raise RemoteError(f'Data Foundation API unreachable: {e.reason}')
+                time.sleep(wait)
         if j.get('state') != 'succeeded':
             raise RemoteError(f"{j.get('state')}: {j.get('error') or j.get('rationale') or j.get('decision')}")
         data = j.get('data') or []

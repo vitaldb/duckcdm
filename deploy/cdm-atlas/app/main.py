@@ -11,6 +11,7 @@ import os
 
 os.environ.setdefault('WEBAPI_BUILD_NAME', 'WebAPI 3.0')
 os.environ.setdefault('SOURCE_DIALECT_LABEL', 'postgresql')
+os.environ.setdefault('SMALL_CELL_MIN', '10')         # counts 1..9 are shown as "<10" (사용자 결정 2026-10-23)
 
 from fastapi.responses import PlainTextResponse
 
