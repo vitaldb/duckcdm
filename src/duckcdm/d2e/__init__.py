@@ -516,10 +516,13 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
     # ---- /d2e/d2e-webapi/* is the WebAPI ------------------------------------------
     @app.middleware('http')
     async def _d2e_webapi(request, call_next):
-        p = request.scope['path']
+        scope = request.scope
+        root = scope.get('root_path') or ''      # some servers keep the mount prefix in path and say so in root_path
+        p = scope['path'][len(root):] if root and scope['path'].startswith(root) else scope['path']
         if p.startswith('/d2e/d2e-webapi/') and not re.match(r'^/d2e/d2e-webapi/vocabulary/[^/]+/search$', p):
-            request.scope['path'] = '/WebAPI/' + p[len('/d2e/d2e-webapi/'):]
-            request.scope['raw_path'] = request.scope['path'].encode()
+            new = '/WebAPI/' + p[len('/d2e/d2e-webapi/'):]
+            scope['path'] = (root + new) if scope['path'] != p else new
+            scope['raw_path'] = scope['path'].encode()
         return await call_next(request)
 
     # these routes go before the ones create_app() made (its "/" and the catch-all ATLAS mount)
