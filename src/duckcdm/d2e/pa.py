@@ -144,6 +144,7 @@ class Translator:
         """concept_set_items(id) -> the concept set's items (WebAPI shape) or None."""
         self.s = source
         self.items = concept_set_items
+        self.cards = None
 
     # ---- SQL pieces -------------------------------------------------------------------------------------------
     def base(self):
@@ -199,7 +200,10 @@ class Translator:
             return f'{col} {"NOT IN" if op == "<>" else "IN"} ({sub})'
         if kind in ('name', 'code'):
             field = 'concept_name' if kind == 'name' else 'concept_code'
-            return f'{col} {"NOT IN" if op == "<>" else "IN"} (SELECT concept_id FROM @vocab.concept WHERE {field} = {q(v)})'
+            return (f'{col} {"NOT IN" if op == "<>" else "IN"} '
+                    f'(SELECT concept_id FROM @vocab.concept WHERE UPPER({field}) = UPPER({q(v)}))')
+        if kind == 'text' and op in ('=', '<>'):
+            return f'UPPER({col}) {op} UPPER({q(v)})'          # D2E compares text case-insensitively
         return f'{col} {op} {self.value_sql(kind, v)}'
 
     def constraints(self, kind, col, cons):
@@ -208,7 +212,7 @@ class Translator:
             return None
         return '(' + ' OR '.join(self.expression(kind, col, e) for e in content) + ')'
 
-    def card(self, c):
+    def card(self, c, root=None):
         """A FilterCard -> a condition on the person row (pt)."""
         if c.get('inactive'):
             return '1 = 1'
@@ -226,25 +230,87 @@ class Translator:
                 if w:
                     parts.append(w)
             return ' AND '.join(parts) if parts else '1 = 1'
-        m = re.match(r'^patient\.interactions\.([^.]+)$', path)
+        table, parts = self.event(c, 'e')
+        if c.get('advanceTimeFilter'):
+            parts.append(self.time_filter(c, 'e', root or c))
+        where = ''.join(f'\n    AND {w}' for w in parts)
+        return f'EXISTS (SELECT 1 FROM @cdm.{table} e WHERE e.person_id = pt.person_id{where})'
+
+    def dates(self, card):
+        """An event card's start and end date columns."""
+        amap = INTERACTIONS[card['configPath'].rsplit('.', 1)[-1]][1]
+        start = (amap.get('startdate') or amap.get('deathdate') or amap.get('specimendate') or (None, None))[1]
+        end = (amap.get('enddate') or (None, start))[1]
+        if not start:
+            raise PAError(f'{card.get("name")} has no dates for a time relation')
+        return {'startdate': start, 'enddate': end or start}
+
+    def time_filter(self, c, alias, root):
+        """advanceTimeFilter.request -> a condition on this card's row (alias): for each related card, one of its
+        rows (another row when it is the same table) with DAYS(this date -> that date) meeting the operators."""
+        mine = self.dates(c)
+        table = INTERACTIONS[c['configPath'].rsplit('.', 1)[-1]][0]
+
+        def related(item, n):
+            other = self.find_card(self.cards, item.get('value') or '')
+            if other is None:
+                raise PAError(f'time relation to a missing card {item.get("value")}')
+            o = f'{alias}t{n}'
+            otab, oparts = self.event(other, o)
+            theirs = self.dates(other)
+            conds = [f'{o}.person_id = {alias}.person_id'] + oparts
+            if otab == table and otab != 'death':
+                conds.append(f'{o}.{otab}_id <> {alias}.{table}_id')
+            for f in item.get('filter') or []:
+                d = f'DATEDIFF(day, {alias}.{mine[f.get("this", "startdate")]}, {o}.{theirs[f.get("other", "startdate")]})'
+                for x in f.get('and') or []:
+                    op = OPS.get(str(x.get('op')))
+                    if op is None:
+                        raise PAError(f'unsupported operator {x.get("op")!r}')
+                    conds.append(f'{d} {op} {int(x.get("value", 0))}')
+            return f'EXISTS (SELECT 1 FROM @cdm.{otab} {o} WHERE ' + ' AND '.join(conds) + ')'
+
+        n = [0]
+
+        def item_sql(item):
+            n[0] += 1
+            if 'or' in item:
+                return '(' + ' OR '.join(item_sql(x) for x in item['or']) + ')'
+            if 'and' in item:
+                return '(' + ' AND '.join(item_sql(x) for x in item['and']) + ')'
+            return related(item, n[0])
+        req = (c.get('advanceTimeFilter') or {}).get('request') or []
+        parts = [item_sql(x) for x in req]
+        return '(' + ' AND '.join(parts) + ')' if parts else '1 = 1'
+
+    def event(self, c, alias):
+        """An event card -> its CDM table and its constraints on one row of it (as alias)."""
+        m = re.match(r'^patient\.interactions\.([^.]+)$', c.get('configPath') or '')
         if not m or m.group(1) not in INTERACTIONS:
-            raise PAError(f'unsupported filter card {path}')
+            raise PAError(f'unsupported filter card {c.get("configPath")}')
         table, amap = INTERACTIONS[m.group(1)]
         parts = []
-        for a in attrs:
+        for a in ((c.get('attributes') or {}).get('content')) or []:
             name = a.get('configPath', '').rsplit('.', 1)[-1]
             if name not in amap:
                 if (a.get('constraints') or {}).get('content'):
                     raise PAError(f'unsupported attribute {name}')
                 continue
             kind, col = amap[name]
-            w = self.constraints(kind, f'e.{col}', a.get('constraints'))
+            w = self.constraints(kind, f'{alias}.{col}', a.get('constraints'))
             if w:
                 parts.append(w)
-        if c.get('advanceTimeFilter'):
-            raise PAError('time relations between cards are not supported yet')
-        where = ''.join(f'\n    AND {w}' for w in parts)
-        return f'EXISTS (SELECT 1 FROM @cdm.{table} e WHERE e.person_id = pt.person_id{where})'
+        return table, parts
+
+    @staticmethod
+    def find_card(node, instance_id):
+        if node.get('type') == 'FilterCard':
+            return node if node.get('instanceID') == instance_id else None
+        for x in node.get('content') or []:
+            f = Translator.find_card(x, instance_id)
+            if f:
+                return f
+        return None
 
     def tree(self, node):
         t = node.get('type')
@@ -265,34 +331,78 @@ class Translator:
 
     # ---- answers ----------------------------------------------------------------------------------------------
     def patient_count(self, cards):
+        self.cards = cards                        # the whole request, for cards that refer to other cards
         n = self.run(f'WITH pt AS (\n{self.base()}\n)\nSELECT COUNT(*) AS n FROM pt WHERE {self.tree(cards)}')[0]['n']
         return {'data': [{'patient.attributes.pcount': cells.mask(int(n))}]}
 
+    def axis(self, cards, aid, binsize, config, joins):
+        """A chart axis -> (SQL expression, category). Event attributes join their card's table (all the card's
+        constraints on that row), so a person counts once under every value their matching events have."""
+        name = aid.rsplit('.', 1)[-1]
+        if aid.startswith('patient.attributes.'):
+            if name not in PERSON:
+                raise PAError(f'unsupported chart axis {aid}')
+            kind, label = PERSON[name][0], (config['patient']['attributes'].get(name) or {}).get('name', name)
+            col = f'pt."{name}"'
+        else:
+            m = re.match(r'^(patient\.interactions\.([^.]+)\.\d+)\.attributes\.([^.]+)$', aid)
+            if not m or m.group(2) not in INTERACTIONS or m.group(3) not in INTERACTIONS[m.group(2)][1]:
+                raise PAError(f'unsupported chart axis {aid}')
+            card = self.find_card(cards, m.group(1))
+            if card is None:
+                raise PAError(f'the chart axis {aid} has no filter card')
+            alias = joins.setdefault(m.group(1), (f'x{len(joins)}', card))[0]
+            kind, c = INTERACTIONS[m.group(2)][1][m.group(3)]
+            label = ((config['patient']['interactions'].get(m.group(2)) or {}).get('attributes', {})
+                     .get(m.group(3)) or {}).get('name', m.group(3))
+            if kind == 'cs':
+                raise PAError('a concept set cannot be a chart axis')
+            if kind in ('name', 'code'):
+                field = 'concept_name' if kind == 'name' else 'concept_code'
+                col = (f"COALESCE((SELECT k.{field} FROM @vocab.concept k WHERE k.concept_id = {alias}.{c}), "
+                       f"'No matching concept')")
+                kind = 'text'
+            else:
+                col = f'{alias}.{c}'
+        cat = {'id': aid, 'value': '{%s}' % aid, 'name': label, 'type': kind, 'axis': 1, 'order': 'ASC'}
+        if kind == 'num' and binsize not in (None, 'n/a', ''):
+            col = f'FLOOR({col} / {float(binsize)}) * {float(binsize)}'
+            cat['binsize'] = binsize
+        elif kind in ('time', 'datetime'):
+            col = f'YEAR({col})'                      # dates are charted by year
+            cat['type'] = 'num'
+        return col, cat
+
+    def chart_from(self, joins):
+        """FROM clause of a chart: the person rows and, for event axes, their cards' matching event rows."""
+        sql = 'pt'
+        for alias, card in joins.values():
+            table, parts = self.event(card, alias)
+            sql += (f'\nJOIN @cdm.{table} {alias} ON {alias}.person_id = pt.person_id'
+                    + ''.join(f' AND {w}' for w in parts))
+        return sql
+
     def bar_chart(self, cards, axes, config):
-        attrs = config['patient']['attributes']
-        cats, dims = [], []
+        self.cards = cards
+        cats, dims, joins = [], [], {}
         for ax in axes:
             aid = ax.get('attributeId')
             if not aid or aid == 'n/a' or not str(ax.get('categoryId', '')).startswith('x'):
                 continue
-            name = aid.rsplit('.', 1)[-1]
-            if not aid.startswith('patient.attributes.') or name not in PERSON:
-                raise PAError('only Basic Data attributes can be chart axes for now')
-            kind, _ = PERSON[name]
-            col = f'pt."{name}"'
-            cat = {'id': aid, 'value': '{%s}' % aid, 'name': (attrs.get(name) or {}).get('name', name),
-                   'type': kind, 'axis': 1, 'order': 'ASC'}
-            b = ax.get('binsize')
-            if kind == 'num' and b not in (None, 'n/a', ''):
-                col = f'FLOOR({col} / {float(b)}) * {float(b)}'
-                cat['binsize'] = b
+            col, cat = self.axis(cards, aid, ax.get('binsize'), config, joins)
             cats.append(cat)
             dims.append((aid, col))
         where = self.tree(cards)
         sel = ''.join(f'{col} AS "{aid}", ' for aid, col in dims)
         group = (' GROUP BY ' + ', '.join(col for _, col in dims)) if dims else ''
-        rows = self.run(f'WITH pt AS (\n{self.base()}\n)\nSELECT {sel}COUNT(*) AS n FROM pt WHERE {where}{group}')
-        total = sum(int(r['n']) for r in rows)
+        src = self.chart_from(joins)
+        rows = self.run(f'WITH pt AS (\n{self.base()}\n)\nSELECT {sel}COUNT(DISTINCT pt.person_id) AS n '
+                        f'FROM {src} WHERE {where}{group}')
+        if joins:      # a person may sit under several values: the total is counted on its own
+            total = int(self.run(f'WITH pt AS (\n{self.base()}\n)\nSELECT COUNT(DISTINCT pt.person_id) AS n '
+                                 f'FROM {src} WHERE {where}')[0]['n'])
+        else:
+            total = sum(int(r['n']) for r in rows)
         data = []
         for r in sorted(rows, key=lambda r: tuple('' if r[a] is None else r[a] for a, _ in dims)):
             n = int(r['n'])
@@ -339,6 +449,7 @@ class Translator:
         return out
 
     def inclusion_report(self, cards):
+        self.cards = cards
         rules = self.rules(cards)
         flags = ''.join(f', CASE WHEN {w} THEN 1 ELSE 0 END AS r{i}' for i, (_, _, w) in enumerate(rules))
         names = ''.join(f', r{i}' for i in range(len(rules)))
