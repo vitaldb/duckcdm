@@ -99,7 +99,7 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     by_key = {s.key: s for s in sources}
     by_id = {s.source_id: s for s in sources}
     reports = {s.key: Reports(s) for s in sources}
-    app.state.sources, app.state.reports = by_key, reports
+    app.state.sources, app.state.reports, app.state.store = by_key, reports, store
 
     def src(key):
         s = by_key.get(key)

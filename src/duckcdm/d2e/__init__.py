@@ -4,6 +4,8 @@ install(app) adds, in front of the ATLAS routes of create_app():
   - the D2E portal and its Concepts plugin (static, from Data2Evidence 0.18), an ATLAS tab (iframe of /atlas/),
   - the D2E service endpoints the portal calls (system-portal, usermgmt, jobplugins, terminology), answered
     from the WebAPI sources and their Achilles reports; /d2e/d2e-webapi/* is the WebAPI itself,
+  - D2E's own cohort builder (the Cohorts tab, analytics-svc): counts, bar chart and attrition through
+    duckcdm.d2e.pa, which turns the screen's filter tree into one SELECT; patient-level answers are refused,
   - a stand-in OIDC provider: the portal logs in through it and gets tokens for the viewer the gateway names
     (X-Auth-User-Id, as for the remote source). The tokens carry no authority — no endpoint reads them.
 The app may run under a path prefix (an app platform's /apps/runtime/<name>/): the page works the prefix out
@@ -22,17 +24,20 @@ import re
 import secrets
 import time
 import urllib.parse
+import zlib
 
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from ..webapi import cells
+from . import pa
 from ..webapi.app import STATIC as ATLAS_STATIC, concept_json, search_filters
 from ..webapi.sources import q, sql_resource
 
 STATIC = os.path.join(os.path.dirname(__file__), 'static')
 PORTAL = os.path.join(STATIC, 'portal')
 CONCEPT_SETS = os.path.join(STATIC, 'concept-sets')
+MRI = os.path.join(STATIC, 'mri')
 CLIENT_ID = 'd2e-portal'
 _B = '(window.__D2E_BASE__||"")'
 
@@ -47,9 +52,9 @@ REWRITES = {
     'css': [('url(/d2e/portal/static/', 'url(../')],  # the portal's stylesheets live in static/css/
 }
 
-# D2E feature flags: what the portal offers. Cohort (patient analytics), notebooks and analyses are not here.
+# D2E feature flags: what the portal offers. Notebooks and analyses are not here.
 FEATURES = [('atlas', 'Atlas', True), ('conceptRecordCounts', 'Concept record counts', True),
-            ('conceptSets', 'Concept sets', True), ('cohort', 'Cohort', False), ('notebook', 'Notebook', False),
+            ('conceptSets', 'Concept sets', True), ('cohort', 'Cohort', True), ('notebook', 'Notebook', False),
             ('strategus', 'Strategus', False), ('wizards', 'Wizards', False), ('shinyLive', 'Dashboards', False),
             ('pythia', 'Pythia', False), ('datasetFilter', 'Dataset filter', False),
             ('datasetSearch', 'Dataset search', False), ('fhirServer', 'Fhir server', False),
@@ -181,17 +186,21 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
         return str(d)[:10] if d else None
 
     @functools.lru_cache(maxsize=None)
-    def entity_counts(key):
-        """Rows per CDM table, for the dataset card's chart (one COUNT(*) per table, once)."""
+    def table_counts(key):
+        """Rows per CDM table (one COUNT(*) per table, once): the dataset card's chart, and which cohort
+        builder cards are offered (a table that is missing or empty gives 0)."""
         s = sources[key]
         out = {}
-        for label, table in ENTITY_TABLES:
+        for table in sorted({t for _, t in ENTITY_TABLES} | {t for t, _ in pa.INTERACTIONS.values()}):
             try:
-                rows = s.query_dicts(f'SELECT COUNT(*) AS n FROM @cdm.{table}', cdm=s.cdm_schema)
-                out[label] = str(int(rows[0]['n']))
+                out[table] = int(s.query_dicts(f'SELECT COUNT(*) AS n FROM @cdm.{table}', cdm=s.cdm_schema)[0]['n'])
             except Exception:
-                out[label] = '0'
+                out[table] = 0
         return out
+
+    def entity_counts(key):
+        n = table_counts(key)
+        return {label: str(n.get(table, 0)) for label, table in ENTITY_TABLES}
 
     def dataset(key):
         s = src(key)
@@ -208,7 +217,7 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
             'id': key, 'tokenStudyCode': key, 'databaseCode': key, 'databaseName': s.name, 'dialect': 'postgres',
             'cacheId': key, 'schemaName': s.cdm_schema, 'vocabSchemaName': s.vocab_schema,
             'resultsSchemaName': s.results_schema, 'type': 'webapi', 'dataModel': 'omop5-4',
-            'plugin': 'omop_cdm_plugin', 'paConfigId': None, 'sourceStudyId': None, 'flowParameters': None,
+            'plugin': 'omop_cdm_plugin', 'paConfigId': pa.CONFIG_ID, 'sourceStudyId': None, 'flowParameters': None,
             'tags': [], 'dashboards': [],
             'attributes': [{'attributeId': a, 'value': None if v is None else str(v),
                             'attributeConfig': {'name': nm, 'dataType': dt, 'isDisplayed': shown}}
@@ -233,6 +242,9 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
             {'type': 'app', 'visible': True, 'autoMount': True, 'featureFlag': 'conceptSets', 'defaultEnabled': True,
              'name': 'Concepts', 'nameI18nKey': 'UI_PLUGIN_CONCEPTS', 'route': 'concepts',
              'pluginPath': '@BASE@/resources/concept-sets/lifecycles.js', 'requiredRoles': ['RESEARCHER']},
+            {'type': 'app', 'visible': True, 'autoMount': False, 'featureFlag': 'cohort', 'defaultEnabled': True,
+             'name': 'Cohorts', 'nameI18nKey': 'UI_PLUGIN_COHORTS', 'route': 'cohort',
+             'pluginPath': '@BASE@/mri/lifecycles.js', 'requiredRoles': ['RESEARCHER']},
             {'type': 'app', 'visible': True, 'autoMount': False, 'featureFlag': 'atlas', 'defaultEnabled': True, 'name': 'Atlas',
              'route': 'atlas', 'pluginPath': '@BASE@/atlas-portal/index.js',
              'requiredRoles': ['RESEARCHER']}],
@@ -294,6 +306,13 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
     @app.get('/resources/concept-sets/{rel:path}')
     def concept_sets_file(rel: str):
         r = _serve(CONCEPT_SETS, rel, 'concept-sets')
+        if r is None:
+            raise HTTPException(404)
+        return r
+
+    @app.get('/mri/{rel:path}')
+    def mri_file(rel: str):
+        r = _serve(MRI, rel, 'mri')
         if r is None:
             raise HTTPException(404)
         return r
@@ -512,6 +531,107 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
         else:
             sql += '\nLIMIT 20000'
         return [concept_json(r) for r in s.query_dicts(sql, CDM_schema=s.vocab_schema)]
+
+    # ---- analytics-svc: D2E's cohort builder -------------------------------------
+    store = app.state.store
+    A = '/d2e/analytics-svc'
+
+    def translator(key):
+        return pa.Translator(src(key), lambda cid: store.get_items(cid) if store.get_concept_set(cid) else None)
+
+    def pa_config(key):
+        n = table_counts(key)
+        return pa.frontend_config({t for t, c in n.items() if c})
+
+    def mriquery(request, body=None):
+        raw = request.query_params.get('mriquery')
+        if raw:
+            b = base64.b64decode(raw)
+            try:
+                b = zlib.decompress(b)
+            except zlib.error:
+                pass
+            return json.loads(b)
+        return body or {}
+
+    def pa_answer(kind, qy):
+        key = qy.get('datasetId') or next(iter(sources))
+        cards = ((qy.get('filter') or {}).get('cards')) or {'type': 'BooleanContainer', 'op': 'AND', 'content': []}
+        t = translator(key)
+        try:
+            if kind == 'patientcount':
+                return t.patient_count(cards)
+            if kind == 'barchart':
+                return t.bar_chart(cards, qy.get('axisSelection') or [], pa_config(key)[0]['config'])
+            if kind in ('inclusionreport', 'selectiveinclusionreport'):
+                return t.inclusion_report(cards)
+        except pa.PAError as e:
+            return JSONResponse({'message': str(e), 'errorMessage': str(e)}, status_code=400)
+        if kind == 'patientlist':
+            return JSONResponse({'message': pa.REFUSED, 'errorMessage': pa.REFUSED}, status_code=403)
+        msg = f'{kind} is not available yet'
+        return JSONResponse({'message': msg, 'errorMessage': msg}, status_code=400)
+
+    @app.get(A + '/pa/services/analytics.xsjs')
+    def pa_my_config(datasetId: str = '', action: str = ''):
+        if action and action != 'getMyConfig':
+            return []
+        return pa_config(datasetId or next(iter(sources)))
+
+    @app.get(A + '/api/services/population/json/{kind}')
+    def pa_population(kind: str, request: Request):
+        return pa_answer(kind, mriquery(request))
+
+    @app.post(A + '/api/services/population/json/{kind}')
+    async def pa_population_post(kind: str, request: Request):
+        body = await request.body()
+        return pa_answer(kind, mriquery(request, json.loads(body) if body else None))
+
+    @app.get(A + '/api/services/values')
+    def pa_values(attributePath: str = '', datasetId: str = '', searchQuery: str = '', attributeType: str = ''):
+        if attributePath == 'conceptSets' or attributeType == 'conceptSet':
+            sets = store.list_concept_sets()
+            s = (searchQuery or '').lower()
+            return {'data': [{'value': str(c['id']), 'text': c['name'], 'score': 1} for c in sets
+                             if not s or s in c['name'].lower()]}
+        key = datasetId or next(iter(sources))
+        name = attributePath.rsplit('.', 1)[-1]
+        m = re.match(r'^patient\.interactions\.([^.]+)\.attributes\.([^.]+)$', attributePath)
+        domain_col = col = None
+        if m and m.group(1) in pa.INTERACTIONS:
+            kind, col = pa.INTERACTIONS[m.group(1)][1].get(m.group(2), (None, None))
+            if kind in ('name', 'code'):
+                domain_col = 'concept_name' if kind == 'name' else 'concept_code'
+                dom = {'condition': 'Condition', 'drug': 'Drug', 'procedure': 'Procedure', 'measurement': 'Measurement',
+                       'observation': 'Observation', 'visit': 'Visit', 'device': 'Device', 'specimen': 'Specimen',
+                       'death': 'Type Concept'}
+                domain = next((v for k, v in dom.items() if col.startswith(k)), None)
+        elif name in ('Gender_concept_name', 'raceName', 'ethnicityName'):
+            domain_col, domain = 'concept_name', {'Gender_concept_name': 'Gender', 'raceName': 'Race',
+                                                  'ethnicityName': 'Ethnicity'}[name]
+        if not domain_col:
+            return {'data': []}
+        s = src(key)
+        where = f"domain_id = {pa.q(domain)}" if domain else '1 = 1'
+        if searchQuery:
+            where += f" AND LOWER({domain_col}) LIKE {pa.q('%' + searchQuery.lower() + '%')}"
+        if domain not in ('Gender', 'Race', 'Ethnicity') and domain_col == 'concept_name' and '_source_' not in (col or ''):
+            where += " AND standard_concept = 'S'"
+        rows = s.query_dicts(f'SELECT DISTINCT {domain_col} AS v FROM @vocab.concept WHERE {where} ORDER BY 1 LIMIT 100',
+                             vocab=s.vocab_schema)
+        return {'data': [{'value': r['v'], 'text': r['v'], 'score': 1} for r in rows]}
+
+    @app.get(A + '/api/services/cohort/can-materialize-cohort')
+    def pa_can_materialize(datasetId: str = ''):
+        return False
+
+    def refused():
+        return JSONResponse({'message': pa.REFUSED, 'errorMessage': pa.REFUSED}, status_code=403)
+
+    for path in ('/api/services/patient', '/api/services/patient/{rest:path}', '/api/services/datastream/{rest:path}',
+                 '/api/services/population/csv/{rest:path}', '/api/services/search-notes',
+                 '/api/services/calcview/{rest:path}'):
+        app.add_api_route(A + path, refused, methods=['GET', 'POST'])
 
     # ---- /d2e/d2e-webapi/* is the WebAPI ------------------------------------------
     @app.middleware('http')
