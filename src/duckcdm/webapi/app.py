@@ -67,6 +67,31 @@ def _merge_related(rows):
     return out
 
 
+def search_filters(body):
+    """WebAPI vocabulary search body -> SQL filter clauses (shared with the D2E concept search)."""
+    f = ''
+    if body.get('DOMAIN_ID'):
+        f += ' AND DOMAIN_ID IN (%s)' % q_in(body['DOMAIN_ID'])
+    if body.get('VOCABULARY_ID'):
+        f += ' AND VOCABULARY_ID IN (%s)' % q_in(body['VOCABULARY_ID'])
+    if body.get('CONCEPT_CLASS_ID'):
+        f += ' AND CONCEPT_CLASS_ID IN (%s)' % q_in(body['CONCEPT_CLASS_ID'])
+    ir = (body.get('INVALID_REASON') or '').strip()
+    if ir:
+        f += ' AND INVALID_REASON IS NULL ' if ir == 'V' else ' AND INVALID_REASON = %s' % q(ir)
+    sc = body.get('STANDARD_CONCEPT')
+    if sc is not None:
+        f += ' AND STANDARD_CONCEPT IS NULL ' if sc == 'N' else ' AND STANDARD_CONCEPT = %s' % q(sc.strip())
+    query = (body.get('QUERY') or '').replace('[', '[[]')
+    if query:
+        lo = like_text(query.lower())
+        qf = "LOWER(CONCEPT_NAME) LIKE '%%%s%%' or LOWER(CONCEPT_CODE) LIKE '%%%s%%'" % (lo, lo)
+        if query.isdigit():
+            qf += ' or CONCEPT_ID = CAST(%s as int)' % q(query)
+        f += ' AND (' + qf + ')'
+    return f
+
+
 def create_app(sources, store, title='duckcdm', gateway=None):
     app = FastAPI(title=title, version=__version__, docs_url='/WebAPI/docs', openapi_url='/WebAPI/openapi.json')
     if gateway is not None:
@@ -74,6 +99,7 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     by_key = {s.key: s for s in sources}
     by_id = {s.source_id: s for s in sources}
     reports = {s.key: Reports(s) for s in sources}
+    app.state.sources, app.state.reports = by_key, reports
 
     def src(key):
         s = by_key.get(key)
@@ -167,29 +193,6 @@ def create_app(sources, store, title='duckcdm', gateway=None):
         return [{'VOCABULARY_ID': r['VOCABULARY_ID'], 'VOCABULARY_NAME': r['VOCABULARY_NAME'],
                  'VOCABULARY_REFERENCE': r.get('VOCABULARY_REFERENCE'), 'VOCABULARY_VERSION': r.get('VOCABULARY_VERSION'),
                  'VOCABULARY_CONCEPT_ID': r.get('VOCABULARY_CONCEPT_ID')} for r in vocab(key, 'getVocabularies.sql')]
-
-    def search_filters(body):
-        f = ''
-        if body.get('DOMAIN_ID'):
-            f += ' AND DOMAIN_ID IN (%s)' % q_in(body['DOMAIN_ID'])
-        if body.get('VOCABULARY_ID'):
-            f += ' AND VOCABULARY_ID IN (%s)' % q_in(body['VOCABULARY_ID'])
-        if body.get('CONCEPT_CLASS_ID'):
-            f += ' AND CONCEPT_CLASS_ID IN (%s)' % q_in(body['CONCEPT_CLASS_ID'])
-        ir = (body.get('INVALID_REASON') or '').strip()
-        if ir:
-            f += ' AND INVALID_REASON IS NULL ' if ir == 'V' else ' AND INVALID_REASON = %s' % q(ir)
-        sc = body.get('STANDARD_CONCEPT')
-        if sc is not None:
-            f += ' AND STANDARD_CONCEPT IS NULL ' if sc == 'N' else ' AND STANDARD_CONCEPT = %s' % q(sc.strip())
-        query = (body.get('QUERY') or '').replace('[', '[[]')
-        if query:
-            lo = like_text(query.lower())
-            qf = "LOWER(CONCEPT_NAME) LIKE '%%%s%%' or LOWER(CONCEPT_CODE) LIKE '%%%s%%'" % (lo, lo)
-            if query.isdigit():
-                qf += ' or CONCEPT_ID = CAST(%s as int)' % q(query)
-            f += ' AND (' + qf + ')'
-        return f
 
     @app.post('/WebAPI/vocabulary/{key}/search')
     async def search(key, request: Request):

@@ -7,3 +7,6 @@ deploy/cdm-atlas/wheels/
 deploy/cdm-atlas/probe_*.json
 deploy/cdm-atlas-kh/wheels/
 deploy/cdm-atlas-kh/data/
+deploy/cdm-d2e/wheels/
+deploy/cdm-d2e-kh/wheels/
+deploy/cdm-d2e-kh/data/

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duckcdm"
-version = "0.5.0.dev11"
+version = "0.5.0.dev12"
 description = "DuckCDM — DuckDB-powered OMOP CDM engine: OHDSI SqlRender, Circe, Achilles and an ATLAS 3.0-compatible WebAPI in pure Python"
 readme = "README.md"
 license = "Apache-2.0"
@@ -40,3 +40,4 @@ where = ["src"]
 "duckcdm.omop" = ["*.csv"]
 "duckcdm.achilles" = ["sql/*.sql", "csv/*.csv"]
 "duckcdm.webapi" = ["sql/*/*.sql", "sql/*/*/*.sql", "sql/*/*/*/*.sql", "static/atlas/*", "static/atlas/*/*", "static/atlas/*/*/*"]
+"duckcdm.d2e" = ["static/*", "static/*/*", "static/*/*/*", "static/*/*/*/*", "static/*/*/*/*/*"]
