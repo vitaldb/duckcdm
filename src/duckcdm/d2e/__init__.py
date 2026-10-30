@@ -224,6 +224,7 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
     @app.get('/d2e/portal/env.js')
     def env_js():
         # one dataset only: open it straight away (the portal's deep link, ?datasetId=, kept in sessionStorage)
+        # and leave the header's dataset picker out
         only = next(iter(sources)) if len(sources) == 1 else None
         plugins = {'researcher': [
             {'type': 'app', 'visible': True, 'autoMount': True, 'featureFlag': 'conceptSets', 'defaultEnabled': True,
@@ -238,6 +239,7 @@ var L=location.pathname,I=L.lastIndexOf('/d2e/portal'),B=(I>=0?L.slice(0,I):L).r
 window.__D2E_BASE__=B;
 var D=%(dataset)s;
 if(D&&!/\\/researcher\\/./.test(L)){try{if(!sessionStorage.getItem('deepLinkParams'))sessionStorage.setItem('deepLinkParams',JSON.stringify({datasetId:D}));}catch(e){}}
+if(D){var st=document.createElement('style');st.textContent='.active-dataset-container{display:none!important}';document.head.appendChild(st);}
 var P=['/d2e/','/resources/','/atlas','/oidc','/WebAPI'];
 function fix(u){if(typeof u==='string'&&B&&u.charAt(0)==='/'&&u.indexOf(B+'/')!==0){for(var i=0;i<P.length;i++)if(u.indexOf(P[i])===0)return B+u;}return u;}
 var f=window.fetch;window.fetch=function(u,o){return f.call(this,typeof u==='string'?fix(u):u,o);};
