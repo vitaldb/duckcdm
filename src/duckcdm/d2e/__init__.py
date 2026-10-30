@@ -223,6 +223,8 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
 
     @app.get('/d2e/portal/env.js')
     def env_js():
+        # one dataset only: open it straight away (the portal's deep link, ?datasetId=, kept in sessionStorage)
+        only = next(iter(sources)) if len(sources) == 1 else None
         plugins = {'researcher': [
             {'type': 'app', 'visible': True, 'autoMount': True, 'featureFlag': 'conceptSets', 'defaultEnabled': True,
              'name': 'Concepts', 'nameI18nKey': 'UI_PLUGIN_CONCEPTS', 'route': 'concepts',
@@ -234,6 +236,8 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
         js = """(function(){
 var L=location.pathname,I=L.lastIndexOf('/d2e/portal'),B=(I>=0?L.slice(0,I):L).replace(/\\/$/,''),O=location.origin;
 window.__D2E_BASE__=B;
+var D=%(dataset)s;
+if(D&&!/\\/researcher\\/./.test(L)){try{if(!sessionStorage.getItem('deepLinkParams'))sessionStorage.setItem('deepLinkParams',JSON.stringify({datasetId:D}));}catch(e){}}
 var P=['/d2e/','/resources/','/atlas','/oidc','/WebAPI'];
 function fix(u){if(typeof u==='string'&&B&&u.charAt(0)==='/'&&u.indexOf(B+'/')!==0){for(var i=0;i<P.length;i++)if(u.indexOf(P[i])===0)return B+u;}return u;}
 var f=window.fetch;window.fetch=function(u,o){return f.call(this,typeof u==='string'?fix(u):u,o);};
@@ -248,7 +252,8 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
  REACT_APP_DB_CREDENTIALS_PUBLIC_KEYS:'{}',REACT_APP_PLUGINS:%(plugins)s.split('@BASE@').join(B),
  REACT_APP_MRI_CONFIG_NAME:'',REACT_APP_LOG_DISCLAIMER:'',REACT_APP_USE_PUBLIC_WEBAPI_PROXY:'false',
  REACT_APP_PUBLIC_WEBAPI_PROXY_URL:'',REACT_APP_PUBLIC_WEBAPI_DATASOURCE:''};
-})();""" % {'client': json.dumps(CLIENT_ID), 'title': json.dumps(title), 'plugins': json.dumps(json.dumps(plugins))}
+})();""" % {'client': json.dumps(CLIENT_ID), 'title': json.dumps(title), 'plugins': json.dumps(json.dumps(plugins)),
+     'dataset': json.dumps(only)}
         return Response(js, media_type='application/javascript', headers={'Cache-Control': 'no-cache'})
 
     @functools.lru_cache(maxsize=1)
