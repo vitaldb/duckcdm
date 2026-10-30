@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 
 from ..webapi import cells
 from . import pa
+from .bookmarks import BookmarkError, Bookmarks
 from ..webapi.app import STATIC as ATLAS_STATIC, concept_json, search_filters
 from ..webapi.sources import q, sql_resource
 
@@ -621,6 +622,67 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
                              vocab=s.vocab_schema)
         return {'data': [{'value': r['v'], 'text': r['v'], 'score': 1} for r in rows]}
 
+    # saved cohorts: the viewer's own drive (duckcdm.d2e.bookmarks)
+    def bookmarks(request):
+        return Bookmarks(viewer(request), request.headers.get('x-app-user-token'))
+
+    def bm_call(fn):
+        try:
+            return fn()
+        except BookmarkError as e:
+            return JSONResponse({'error': str(e), 'message': str(e)}, status_code=e.status)
+
+    async def bm_body(request):
+        b = await request.body()
+        return json.loads(b) if b else {}
+
+    @app.get(A + '/api/services/bookmark')
+    @app.get(A + '/api/services/bookmark/')
+    def bm_list(request: Request, paConfigId: str = '', datasetId: str = ''):
+        return bm_call(lambda: bookmarks(request).load_all(paConfigId or None))
+
+    @app.get(A + '/api/services/bookmark/bookmarkIds')
+    def bm_ids(request: Request, ids: str = '', paConfigId: str = ''):
+        return bm_call(lambda: bookmarks(request).load_ids([i for i in ids.split(',') if i], paConfigId or None))
+
+    @app.post(A + '/api/services/bookmark')
+    @app.post(A + '/api/services/bookmark/')
+    async def bm_post(request: Request):
+        p = await bm_body(request)
+        b = bookmarks(request)
+        if p.get('cmd', 'insert') == 'loadAll':
+            return bm_call(lambda: b.load_all(p.get('paConfigId') or None))
+        return bm_call(lambda: b.insert(p))
+
+    @app.put(A + '/api/services/bookmark/{bid}')
+    async def bm_put(bid: str, request: Request):
+        p = await bm_body(request)
+        return bm_call(lambda: bookmarks(request).update(bid, p))
+
+    @app.delete(A + '/api/services/bookmark/{bid}')
+    def bm_delete(bid: str, request: Request):
+        return bm_call(lambda: bookmarks(request).delete(bid))
+
+    @app.post(A + '/api/services/bookmark/{bid}/duplicate')
+    async def bm_duplicate(bid: str, request: Request):
+        p = await bm_body(request)
+        return bm_call(lambda: bookmarks(request).duplicate(bid, p))
+
+    @app.get('/d2e/d2e-webapi/cohortdefinition-pa')
+    def pa_cohort_list(request: Request):
+        """The cohort builder's list (cohortdefinition?source=pa): the viewer's saved cohorts and the ATLAS definitions."""
+        def atlas(c):
+            d = {k: c[k] for k in ('id', 'name', 'createdDate', 'hasWriteAccess', 'hasReadAccess', 'tags')}
+            d['description'] = c.get('description')
+            d['createdBy'] = (c.get('createdBy') or {}).get('name')
+            if c.get('modifiedDate'):
+                d['modifiedDate'] = c['modifiedDate']
+            return d
+        out = bm_call(lambda: bookmarks(request).load_all()['bookmarks'])
+        if isinstance(out, Response):
+            return out
+        return out + [atlas(c) for c in store.list_cohorts()]
+
     @app.get(A + '/api/services/cohort/can-materialize-cohort')
     def pa_can_materialize(datasetId: str = ''):
         return False
@@ -639,7 +701,11 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
         scope = request.scope
         root = scope.get('root_path') or ''      # some servers keep the mount prefix in path and say so in root_path
         p = scope['path'][len(root):] if root and scope['path'].startswith(root) else scope['path']
-        if p.startswith('/d2e/d2e-webapi/') and not re.match(r'^/d2e/d2e-webapi/vocabulary/[^/]+/search$', p):
+        if p == '/d2e/d2e-webapi/cohortdefinition' and b'source=pa' in scope.get('query_string', b''):
+            new = '/d2e/d2e-webapi/cohortdefinition-pa'     # the cohort builder's list, not the WebAPI's
+            scope['path'] = (root + new) if scope['path'] != p else new
+            scope['raw_path'] = scope['path'].encode()
+        elif p.startswith('/d2e/d2e-webapi/') and not re.match(r'^/d2e/d2e-webapi/vocabulary/[^/]+/search$', p):
             new = '/WebAPI/' + p[len('/d2e/d2e-webapi/'):]
             scope['path'] = (root + new) if scope['path'] != p else new
             scope['raw_path'] = scope['path'].encode()
