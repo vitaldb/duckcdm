@@ -270,13 +270,19 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
                 '<meta name="viewport" content="width=device-width,initial-scale=1"/>'
                 f'<title>{title}</title><script>var L=location.pathname,I=L.lastIndexOf("/d2e/portal"),B=(I>=0?L.slice(0,I):L).replace(/\\/$/,"");'
                 "document.write('<base href=\"'+B+'/d2e/portal\"/><link rel=\"icon\" href=\"'+B+'/d2e/portal/assets/favicon.ico\"/>');"
-                "document.write('<script src=\"'+B+'/d2e/portal/env.js\"><\\/script><script src=\"'+B+'/d2e/portal/cells.js\"><\\/script>');"
+                "document.write('<script src=\"'+B+'/d2e/portal/env.js\"><\\/script><script src=\"'+B+'/d2e/portal/cells.js\"><\\/script>"
+                "<script src=\"'+B+'/d2e/portal/dark.js\"><\\/script>');"
                 f'{css}</script></head><body><noscript>You need to enable JavaScript to run this app.</noscript>'
                 f'<div id="root"></div><script>{js}</script></body></html>')
 
     @app.get('/d2e/portal/cells.js')
     def portal_cells():
         return Response(cells.page_js(), media_type='application/javascript', headers={'Cache-Control': 'no-cache'})
+
+    @app.get('/d2e/portal/dark.js')
+    def portal_dark():
+        return FileResponse(os.path.join(STATIC, 'dark.js'), media_type='application/javascript',
+                            headers={'Cache-Control': 'no-cache'})
 
     @app.get('/d2e/portal')
     @app.get('/d2e/portal/')
