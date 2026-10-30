@@ -134,6 +134,20 @@ def frontend_config(tables=None):
         v['attributes'] = {a: b for a, b in v['attributes'].items() if a in INTERACTIONS[k][1]}
         inter[k] = v
     patient['interactions'] = inter
+    # no patient list, genomics or custom charts; no CSV (it is per patient) or collections (patient lists);
+    # box plot and Kaplan-Meier are not answered (D2E 0.18 does not answer them either)
+    co = cfg.get('chartOptions') or {}
+    for k in ('list', 'vb', 'custom', 'boxplot', 'km'):
+        if k in co:
+            co[k]['visible'] = False
+    for k in ('stacked', 'boxplot', 'km', 'list'):
+        if k in co:
+            co[k]['downloadEnabled'] = False
+            co[k]['collectionEnabled'] = False
+            co[k].pop('zipDownloadEnabled', None)
+    co['minCohortSize'] = max(1, cells.MIN)
+    po = cfg.get('panelOptions') or {}
+    po.update(addToCohorts=False, calcViewAccessPoint=False, externalAccessPoints=False)
     return [{'meta': {'configId': CONFIG_ID, 'configVersion': 'A', 'configStatus': 'A', 'configName': 'OMOP CDM',
                       'configType': 'HC/MRI/PA', 'dependentConfig': {'configId': CONFIG_ID, 'configVersion': 'A'}},
              'config': cfg}]
@@ -422,6 +436,40 @@ class Translator:
                 'totalPatientCount': cells.mask(total),
                 'postProcessingConfig': {'fillMissingValuesEnabled': True, 'NOVALUE': 'NoValue',
                                          'shouldFormatBinningLabels': True}}
+
+    def compare_bar(self, cohorts, xaxes, config):
+        """Saved cohorts side by side (patient/cohorts/compare/barchart): per cohort, persons per x-axis value.
+        cohorts: [(id, name, cards)]."""
+        data, cats = [], [{'axis': 1, 'id': 'cohortId', 'name': 'cohort', 'order': 'ASC', 'type': 'text',
+                           'value': '{cohortId}'}]
+        for i, (cid, name, cards) in enumerate(cohorts):
+            self.cards = cards
+            dims, joins = [], {}
+            for aid in xaxes:
+                try:
+                    col, cat = self.axis(cards, aid, None, config, joins)
+                except PAError:          # an event axis this cohort has no card for: counted without it, as D2E does
+                    continue
+                dims.append((aid, col))
+                if not any(c['id'] == aid for c in cats):
+                    cats.append(dict(cat, name='', type='text'))
+            sel = ''.join(f'{col} AS "{aid}", ' for aid, col in dims)
+            group = (' GROUP BY ' + ', '.join(col for _, col in dims)) if dims else ''
+            rows = self.run(f'WITH pt AS (\n{self.base()}\n)\nSELECT {sel}COUNT(DISTINCT pt.person_id) AS n '
+                            f'FROM {self.chart_from(joins)} WHERE {self.tree(cards)}{group}')
+            for r in rows:
+                n = int(r['n'])
+                if cells.small(n):
+                    continue
+                row = {'cohortId': cid, 'cohortName': name, 'patient.attributes.pcount': n}
+                for aid, _ in dims:
+                    v = r[aid]
+                    row[aid] = int(v) if isinstance(v, float) and v.is_integer() else v
+                data.append(row)
+        return {'categories': cats,
+                'measures': [{'group': 1, 'id': 'patient.attributes.pcount', 'name': 'Patient Count', 'type': 'num',
+                              'value': '{patient.attributes.pcount}'}],
+                'data': data, 'noDataReason': None}
 
     def rules(self, cards):
         """The attrition rules, in order: each constrained Basic Data attribute, then every other card

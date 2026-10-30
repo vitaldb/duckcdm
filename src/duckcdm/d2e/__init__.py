@@ -687,6 +687,29 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
     def pa_can_materialize(datasetId: str = ''):
         return False
 
+    @app.get(A + '/api/services/patient/cohorts/compare/{chart}')
+    def pa_compare(chart: str, request: Request, ids: str = '', xaxis: str = '', yaxis: str = '', datasetId: str = ''):
+        if chart != 'barchart':
+            return JSONResponse({'message': f'comparing cohorts as {chart} is not available',
+                                 'errorMessage': f'comparing cohorts as {chart} is not available'}, status_code=400)
+        key = datasetId or next(iter(sources))
+        saved = bm_call(lambda: bookmarks(request).load_ids([i for i in ids.split(',') if i])['bookmarks'])
+        if isinstance(saved, Response):
+            return saved
+        order = {i: n for n, i in enumerate(ids.split(','))}
+        cohorts = []
+        for b in sorted(saved, key=lambda b: order.get(b['bmkId'], 0)):
+            try:
+                cards = ((json.loads(b['bookmark']).get('filter') or {}).get('cards'))
+            except ValueError:
+                continue
+            cohorts.append((b['bmkId'], b['bookmarkname'], cards or {'type': 'BooleanContainer', 'op': 'AND', 'content': []}))
+        xs = [x for x in xaxis.split(',') if x and x not in ('undefined', 'n/a')]
+        try:
+            return translator(key).compare_bar(cohorts, xs, pa_config(key)[0]['config'])
+        except pa.PAError as e:
+            return JSONResponse({'message': str(e), 'errorMessage': str(e)}, status_code=400)
+
     def refused():
         return JSONResponse({'message': pa.REFUSED, 'errorMessage': pa.REFUSED}, status_code=403)
 
