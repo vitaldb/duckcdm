@@ -25,7 +25,7 @@ store = Store(os.environ.get('STORE_PATH', '/tmp/cdm-d2e-store.duckdb'), user='d
 app = create_app([source], store, title='CDM D2E')
 install_identity(app)
 d2e.install(app, title='CDM D2E', description=os.environ.get(
-    'D2E_DESCRIPTION', '서울대병원 OMOP CDM — 앱 권한으로 집계 수만 보입니다(1~9명은 <10). 환자 단위 화면은 없습니다.'))
+    'D2E_DESCRIPTION', '서울대병원 OMOP CDM'))
 # no FastAPI documentation pages (they list the server internals)
 app.router.routes = [r for r in app.router.routes if getattr(r, 'path', '') not in (
     '/docs', '/redoc', '/openapi.json', '/docs/oauth2-redirect', '/WebAPI/docs', '/WebAPI/openapi.json')]

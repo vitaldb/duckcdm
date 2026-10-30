@@ -1,7 +1,7 @@
 """D2E (Data2Evidence) portal on DuckCDM — the D2E UI with the WebAPI of this server, no trex.
 
 install(app) adds, in front of the ATLAS routes of create_app():
-  - the D2E portal and its Concepts plugin (static, from Data2Evidence 0.18), an ATLAS tab (iframe of /atlas/),
+  - the D2E portal and its Concepts plugin (static, from Data2Evidence 0.18),
   - the D2E service endpoints the portal calls (system-portal, usermgmt, jobplugins, terminology), answered
     from the WebAPI sources and their Achilles reports; /d2e/d2e-webapi/* is the WebAPI itself,
   - D2E's own cohort builder (the Cohorts tab, analytics-svc): counts, bar chart and attrition through
@@ -48,7 +48,12 @@ REWRITES = {
                ('PUBLIC_URL:"/d2e/portal"', f'PUBLIC_URL:{_B}+"/d2e/portal"'),
                ('basename:"/d2e/portal"', f'basename:{_B}+"/d2e/portal"'),
                ('.concat(window.location.origin,"/d2e/portal")', f'.concat(window.location.origin+{_B},"/d2e/portal")'),
-               ('.concat(window.location.origin,"/atlas/")', f'.concat(window.location.origin+{_B},"/atlas/")')],
+               ('.concat(window.location.origin,"/atlas/")', f'.concat(window.location.origin+{_B},"/atlas/")'),
+               # no Account page (the platform signs the viewer in): drop the button and the header tab
+               ('return(0,f.jsx)(ne.$n,{containerClassName:"account-button",variant:"outlined",text:a,onClick:s})',
+                'return null'),
+               ('return(0,i.jsx)("li",{className:"".concat(d," header__menu-item--pin-right"),children:(0,i.jsx)(s.Link,'
+                '{to:c(),children:n(l.ACCOUNT_TAB__LINK)})})', 'return null')],
     'concept-sets': [('="/resources/concept-sets"', f'={_B}+"/resources/concept-sets"')],
     'css': [('url(/d2e/portal/static/', 'url(../')],  # the portal's stylesheets live in static/css/
 }
@@ -74,27 +79,6 @@ ENTITY_TABLES = [('Observation Period Count', 'observation_period'), ('Death Cou
 # Data characterization report -> Achilles report of the WebAPI (Reports method or treemap domain)
 DC_REPORTS = {'dashboard': 'dashboard', 'person': 'person', 'datadensity': 'data_density', 'death': 'death',
               'observationPeriod': 'observation_period'}
-
-# the stand-in for D2E's own "Atlas" plugin (that one needs vue/single-spa-vue from an import map)
-ATLAS_PLUGIN_JS = """System.register([], function (exp) {
-  var frames = {};
-  return { execute: function () {
-    exp('bootstrap', function () { return Promise.resolve(); });
-    exp('mount', function (p) {
-      var box = document.getElementById(p.containerId) || document.getElementById('single-spa-application:' + p.name);
-      if (!box) { box = document.createElement('div'); document.body.appendChild(box); }
-      var f = document.createElement('iframe');
-      f.src = (window.__D2E_BASE__ || '') + '/atlas/#/cohorts';
-      f.style.cssText = 'border:0;width:100%;height:calc(100vh - 64px);display:block';
-      f.setAttribute('allow', 'clipboard-read; clipboard-write');
-      box.appendChild(f); frames[p.name] = f;
-      return Promise.resolve();
-    });
-    exp('unmount', function (p) { var f = frames[p.name]; if (f) { f.remove(); delete frames[p.name]; } return Promise.resolve(); });
-  } };
-});
-"""
-
 
 def _b64(b):
     return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
@@ -245,10 +229,7 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
              'pluginPath': '@BASE@/resources/concept-sets/lifecycles.js', 'requiredRoles': ['RESEARCHER']},
             {'type': 'app', 'visible': True, 'autoMount': False, 'featureFlag': 'cohort', 'defaultEnabled': True,
              'name': 'Cohorts', 'nameI18nKey': 'UI_PLUGIN_COHORTS', 'route': 'cohort',
-             'pluginPath': '@BASE@/mri/lifecycles.js', 'requiredRoles': ['RESEARCHER']},
-            {'type': 'app', 'visible': True, 'autoMount': False, 'featureFlag': 'atlas', 'defaultEnabled': True, 'name': 'Atlas',
-             'route': 'atlas', 'pluginPath': '@BASE@/atlas-portal/index.js',
-             'requiredRoles': ['RESEARCHER']}],
+             'pluginPath': '@BASE@/mri/lifecycles.js', 'requiredRoles': ['RESEARCHER']}],
             'etl': [], 'setup': [], 'systemadmin': []}
         js = """(function(){
 var L=location.pathname,I=L.lastIndexOf('/d2e/portal'),B=(I>=0?L.slice(0,I):L).replace(/\\/$/,''),O=location.origin;
@@ -317,10 +298,6 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
         if r is None:
             raise HTTPException(404)
         return r
-
-    @app.get('/atlas-portal/index.js')
-    def atlas_plugin():
-        return Response(ATLAS_PLUGIN_JS, media_type='application/javascript')
 
     @app.get('/atlas')
     def atlas_root():
