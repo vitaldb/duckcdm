@@ -3,4 +3,4 @@ OHDSI/circe-be 021150e76804491b1a646dfa11ad09bafda2931a (Thu Sep 24 16:33:02 202
 OHDSI/WebAPI (branch webapi-3.0) ba0f901fc442c385bf28d02add97dc684b9458bd (Fri Sep 25 07:38:56 2026 +0800)
 OHDSI/Atlas3 d9252fed4b700292f1a1a3211c06927f8e7ab64d (Tue Sep 29 11:42:59 2026 -0400) — built dist bundled in src/duckcdm/webapi/static/atlas
 OHDSI/Achilles 113433da2ce33ec26463a49f45278ba297a75987 (Fri Oct 10 16:38:02 2025 -0400)
-OHDSI/Data2Evidence v0.18.2-beta (images 0.18.14-beta, @data2evidence/d2e-ui 0.18.14) — built portal and concept-sets UI (source maps and docs removed) bundled in src/duckcdm/d2e/static, Apache-2.0
+OHDSI/Data2Evidence 0.19 (image ghcr.io/ohdsi/d2e-trex:0.19.5-beta, @data2evidence/atlas 0.19.5 with @ohdsi/atlas3 0.1.0) — D2E's built ATLAS 3 with its datasource, patient-analytics and data-quality plugins (source maps removed) bundled in src/duckcdm/d2e/static/atlas, Apache-2.0

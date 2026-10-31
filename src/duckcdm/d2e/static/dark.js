@@ -1,5 +1,6 @@
-// Dark theme for the D2E portal. It follows the OS setting (prefers-color-scheme), as the app platform asks of apps.
-// D2E 0.18 has no dark theme, and most of its styles are made in JS (MUI/emotion, the Vue plugins), so the colours are
+// Dark theme for D2E's plugins. It follows the OS setting (prefers-color-scheme), as the app platform asks of apps.
+// ATLAS 3 has a dark theme of its own (d2e.js picks it), but D2E's plugins (the cohort builder's Vuetify, SAP UI5 and
+// d4l styles, inline navy) stay light, and most of their styles are made in JS, so the colours are
 // swapped where they are applied: every style rule (CSS files, <style> elements, insertRule), inline style attributes,
 // SVG fill/stroke attributes and canvas drawing (charts). A colour gets the dark value of its role — text, surface,
 // line or fill: TABLE names the dark value of D2E's own colours one by one; any other colour keeps its hue and gets a

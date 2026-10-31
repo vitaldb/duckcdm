@@ -1,4 +1,4 @@
-"""CDM D2E (koreahealth.ai) — the Data2Evidence (D2E) portal over the public synthetic CDM, backed by DuckCDM (no trex).
+"""CDM D2E (koreahealth.ai) — the Data2Evidence (D2E) screens over the public synthetic CDM, backed by DuckCDM (no trex).
 
 The CDM is the public Synthetic-SNUH dataset (143 synthetic patients — no real records) bundled as one DuckDB
 (data/synthetic_snuh.duckdb, built by deploy/cdm-atlas-kh/build_db.py), copied to /tmp at start so cohort results

@@ -1,0 +1,2 @@
+import{cH as o}from"./index-D65JixWS.js";import{l as n,N as i,a3 as l,a4 as p,a1 as s,a2 as e,R as c,P as _,Q as m}from"./vendor-vue-7_WxDR4L.js";const P=n({inheritAttrs:!1,__name:"AtlasContainer",setup(f){return(a,u)=>(c(),i(o,s(e(a.$attrs)),l({_:2},[p(a.$slots,(d,r)=>({name:r,fn:_(t=>[m(a.$slots,r,s(e(t??{})))])}))]),1040))}});export{P as _};
+//# sourceMappingURL=AtlasContainer.vue_vue_type_script_setup_true_lang-I4cK0Rhj.js.map

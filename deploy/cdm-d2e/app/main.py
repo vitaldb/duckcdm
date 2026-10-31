@@ -1,4 +1,4 @@
-"""CDM D2E — the Data2Evidence (D2E) portal on the snuh.ai app platform, backed by DuckCDM over Tables (no trex).
+"""CDM D2E — the Data2Evidence (D2E) screens on the snuh.ai app platform, backed by DuckCDM over Tables (no trex).
 
 Same backend as CDM ATLAS (deploy/cdm-atlas): the CDM is read from the Data Foundation Tables dataset
 (DF_DATASET, default snuh_cdm) with the app's own permissions (DF_AUTH=app), each query logged with the viewer's

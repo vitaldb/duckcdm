@@ -1,15 +1,17 @@
-"""D2E (Data2Evidence) portal on DuckCDM — the D2E UI with the WebAPI of this server, no trex.
+"""D2E (Data2Evidence) on DuckCDM — the D2E 0.19 UI with the WebAPI of this server, no trex.
 
 install(app) adds, in front of the ATLAS routes of create_app():
-  - the D2E portal and its Concepts plugin (static, from Data2Evidence 0.18),
-  - the D2E service endpoints the portal calls (system-portal, usermgmt, jobplugins, terminology), answered
-    from the WebAPI sources and their Achilles reports; /d2e/d2e-webapi/* is the WebAPI itself,
-  - D2E's own cohort builder (the Cohorts tab, analytics-svc): counts, bar chart and attrition through
-    duckcdm.d2e.pa, which turns the screen's filter tree into one SELECT; patient-level answers are refused,
-  - a stand-in OIDC provider: the portal logs in through it and gets tokens for the viewer the gateway names
-    (X-Auth-User-Id, as for the remote source). The tokens carry no authority — no endpoint reads them.
-The app may run under a path prefix (an app platform's /apps/runtime/<name>/): the page works the prefix out
-from its own URL (window.__D2E_BASE__) and the few absolute paths of the D2E build are rewritten to use it.
+  - D2E's ATLAS 3 build at /atlas (static, from Data2Evidence 0.19), the shell of D2E 0.19, with three of its
+    plugins: Data Sources (dataset description, data characterization), Data Exploration (D2E's cohort builder)
+    and Data Quality. No Pythia, notebooks, Strategus, studies, results viewer or analysis hub,
+  - the D2E service endpoints these call (system-portal, usermgmt, jobplugins), answered from the WebAPI sources
+    and their Achilles reports; /d2e/d2e-webapi/* is the WebAPI itself,
+  - D2E's cohort builder service (analytics-svc): counts, bar chart and attrition through duckcdm.d2e.pa, which
+    turns the screen's filter tree into one SELECT; patient-level answers are refused,
+  - in place of D2E's sign-in (Logto/trex), atlas/d2e.js: a token for the viewer the gateway names (X-Auth-User-Id,
+    as for the remote source), the landing route and the theme. The token carries no authority — no endpoint reads it.
+The app may run under a path prefix (an app platform's /apps/runtime/<name>/): d2e.js works the prefix out from
+the page's URL and puts it in front of the absolute paths the D2E build asks for.
 Patient-level views are not part of it; counts go through the same small-cell suppression as the WebAPI.
 """
 import base64
@@ -23,7 +25,6 @@ import os
 import re
 import secrets
 import time
-import urllib.parse
 import zlib
 
 from fastapi import HTTPException, Request
@@ -32,40 +33,21 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from ..webapi import cells
 from . import pa
 from .bookmarks import BookmarkError, Bookmarks
-from ..webapi.app import STATIC as ATLAS_STATIC, concept_json, search_filters
-from ..webapi.sources import q, sql_resource
 
 STATIC = os.path.join(os.path.dirname(__file__), 'static')
-PORTAL = os.path.join(STATIC, 'portal')
-CONCEPT_SETS = os.path.join(STATIC, 'concept-sets')
-MRI = os.path.join(STATIC, 'mri')
+D2E_ATLAS = os.path.join(STATIC, 'atlas')
+# the plugins of D2E's ATLAS build that run here (no Pythia, notebooks, Strategus, studies or results viewer)
+ATLAS_PLUGINS = ('datasources', 'patient-analytics', 'data-quality')
 CLIENT_ID = 'd2e-portal'
-_B = '(window.__D2E_BASE__||"")'
 
-# absolute paths in the D2E build -> the same path under the page's prefix
-REWRITES = {
-    'portal': [('n.p="/d2e/portal/"', f'n.p={_B}+"/d2e/portal/"'),
-               ('PUBLIC_URL:"/d2e/portal"', f'PUBLIC_URL:{_B}+"/d2e/portal"'),
-               ('basename:"/d2e/portal"', f'basename:{_B}+"/d2e/portal"'),
-               ('.concat(window.location.origin,"/d2e/portal")', f'.concat(window.location.origin+{_B},"/d2e/portal")'),
-               ('.concat(window.location.origin,"/atlas/")', f'.concat(window.location.origin+{_B},"/atlas/")'),
-               # no Account page (the platform signs the viewer in): drop the button and the header tab
-               ('return(0,f.jsx)(ne.$n,{containerClassName:"account-button",variant:"outlined",text:a,onClick:s})',
-                'return null'),
-               ('return(0,i.jsx)("li",{className:"".concat(d," header__menu-item--pin-right"),children:(0,i.jsx)(s.Link,'
-                '{to:c(),children:n(l.ACCOUNT_TAB__LINK)})})', 'return null')],
-    'concept-sets': [('="/resources/concept-sets"', f'={_B}+"/resources/concept-sets"')],
-    'css': [('url(/d2e/portal/static/', 'url(../')],  # the portal's stylesheets live in static/css/
-}
-
-# D2E feature flags: what the portal offers. Notebooks and analyses are not here.
+# D2E feature flags: what the screens offer. Notebooks and analyses are not here.
 FEATURES = [('atlas', 'Atlas', True), ('conceptRecordCounts', 'Concept record counts', True),
             ('conceptSets', 'Concept sets', True), ('cohort', 'Cohort', True), ('notebook', 'Notebook', False),
             ('strategus', 'Strategus', False), ('wizards', 'Wizards', False), ('shinyLive', 'Dashboards', False),
             ('pythia', 'Pythia', False), ('datasetFilter', 'Dataset filter', False),
             ('datasetSearch', 'Dataset search', False), ('fhirServer', 'Fhir server', False),
             ('mappingSuggestion', 'Data mapping AI suggestion', False), ('adminOnlySharing', 'Admin only sharing', False),
-            ('aiAssistant', 'AI assistant', False), ('sibyl', 'Sibyl', False), ('dataExploration', 'Data exploration', False),
+            ('aiAssistant', 'AI assistant', False), ('sibyl', 'Sibyl', False), ('dataExploration', 'Data exploration', True),
             ('d2eLogs', 'Logs', False)]
 
 # the dataset card's "Entity Count Distribution" (labels as D2E writes them)
@@ -84,10 +66,6 @@ def _b64(b):
     return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
 
 
-def _unb64(s):
-    return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4))
-
-
 def _iso(ts=None):
     return datetime.datetime.fromtimestamp(ts or time.time(), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
@@ -102,26 +80,6 @@ def _upper(v):
     if isinstance(v, dict):
         return {k: rows(x) for k, x in v.items()}
     return rows(v)
-
-
-@functools.lru_cache(maxsize=None)
-def _static_text(path, kind):
-    with open(path, encoding='utf-8') as f:
-        t = f.read()
-    for old, new in REWRITES.get(kind, ()):
-        t = t.replace(old, new)
-    return t
-
-
-def _serve(root, rel, kind):
-    path = os.path.normpath(os.path.join(root, rel))
-    if not path.startswith(root + os.sep) or not os.path.isfile(path):
-        return None
-    if path.endswith('.js'):
-        return Response(_static_text(path, kind), media_type='application/javascript')
-    if path.endswith('.css'):
-        return Response(_static_text(path, 'css'), media_type='text/css')
-    return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
 
 
 def install(app, title='CDM D2E', description=None, small_cell_label=None):
@@ -204,9 +162,10 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
             'resultsSchemaName': s.results_schema, 'type': 'webapi', 'dataModel': 'omop5-4',
             'plugin': 'omop_cdm_plugin', 'paConfigId': pa.CONFIG_ID, 'sourceStudyId': None, 'flowParameters': None,
             'tags': [], 'dashboards': [],
+            # ATLAS's data source page lists every attribute it gets: only the ones meant to be seen
             'attributes': [{'attributeId': a, 'value': None if v is None else str(v),
                             'attributeConfig': {'name': nm, 'dataType': dt, 'isDisplayed': shown}}
-                           for a, nm, dt, v, shown in attrs],
+                           for a, nm, dt, v, shown in attrs if shown],
             'tenant': {'id': 'tenant', 'name': 'Tenant', 'system': 'Research System'},
             'studyDetail': {'name': s.name, 'description': description or s.name, 'summary': description or s.name,
                             'showRequestAccess': False},
@@ -219,108 +178,96 @@ def install(app, title='CDM D2E', description=None, small_cell_label=None):
 
     @app.get('/')
     def root():
-        return RedirectResponse('d2e/portal/', status_code=302)
-
-    @app.get('/d2e/portal/env.js')
-    def env_js():
-        # one dataset only: open it straight away (the portal's deep link, ?datasetId=, kept in sessionStorage)
-        # and leave the header's dataset picker out
-        only = next(iter(sources)) if len(sources) == 1 else None
-        plugins = {'researcher': [
-            {'type': 'app', 'visible': True, 'autoMount': True, 'featureFlag': 'conceptSets', 'defaultEnabled': True,
-             'name': 'Concepts', 'nameI18nKey': 'UI_PLUGIN_CONCEPTS', 'route': 'concepts',
-             'pluginPath': '@BASE@/resources/concept-sets/lifecycles.js', 'requiredRoles': ['RESEARCHER']},
-            {'type': 'app', 'visible': True, 'autoMount': False, 'featureFlag': 'cohort', 'defaultEnabled': True,
-             'name': 'Cohorts', 'nameI18nKey': 'UI_PLUGIN_COHORTS', 'route': 'cohort',
-             'pluginPath': '@BASE@/mri/lifecycles.js', 'requiredRoles': ['RESEARCHER']}],
-            'etl': [], 'setup': [], 'systemadmin': []}
-        js = """(function(){
-var L=location.pathname,I=L.lastIndexOf('/d2e/portal'),B=(I>=0?L.slice(0,I):L).replace(/\\/$/,''),O=location.origin;
-window.__D2E_BASE__=B;
-var D=%(dataset)s;
-if(D&&!/\\/researcher\\/./.test(L)){try{if(!sessionStorage.getItem('deepLinkParams'))sessionStorage.setItem('deepLinkParams',JSON.stringify({datasetId:D}));}catch(e){}}
-if(D){var st=document.createElement('style');st.textContent='.active-dataset-container{display:none!important}';document.head.appendChild(st);}
-var P=['/d2e/','/resources/','/atlas','/oidc','/WebAPI'];
-function fix(u){if(typeof u==='string'&&B&&u.charAt(0)==='/'&&u.indexOf(B+'/')!==0){for(var i=0;i<P.length;i++)if(u.indexOf(P[i])===0)return B+u;}return u;}
-var f=window.fetch;window.fetch=function(u,o){return f.call(this,typeof u==='string'?fix(u):u,o);};
-var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=fix(u);return x.apply(this,arguments);};
-var oidc={client_id:%(client)s,redirect_uri:O+B+'/d2e/portal/login-callback',authority:O+B+'/',
- authority_configuration:{issuer:O+B+'/oidc',authorization_endpoint:O+B+'/oidc/auth',token_endpoint:O+B+'/d2e/oauth/token',
- end_session_endpoint:O+B+'/oidc/session/end?redirect='+encodeURIComponent(O+B+'/d2e/portal')},
- scope:'openid offline_access profile email',refresh_time_before_tokens_expiration_in_second:180};
-window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',REACT_APP_IDP_RELYING_PARTY:'',
- REACT_APP_IDP_REQUIRED_CLAIM:'thirdPartyToken',REACT_APP_DN_BASE_URL:O+B+'/',REACT_APP_CURRENT_SYSTEM:%(title)s,
- REACT_APP_IDP_SUBJECT_PROP:'sub',REACT_APP_IDP_NAME_PROP:'username',REACT_APP_IDP_OIDC_CONFIG:JSON.stringify(oidc),
- REACT_APP_DB_CREDENTIALS_PUBLIC_KEYS:'{}',REACT_APP_PLUGINS:%(plugins)s.split('@BASE@').join(B),
- REACT_APP_MRI_CONFIG_NAME:'',REACT_APP_LOG_DISCLAIMER:'',REACT_APP_USE_PUBLIC_WEBAPI_PROXY:'false',
- REACT_APP_PUBLIC_WEBAPI_PROXY_URL:'',REACT_APP_PUBLIC_WEBAPI_DATASOURCE:''};
-})();""" % {'client': json.dumps(CLIENT_ID), 'title': json.dumps(title), 'plugins': json.dumps(json.dumps(plugins)),
-     'dataset': json.dumps(only)}
-        return Response(js, media_type='application/javascript', headers={'Cache-Control': 'no-cache'})
-
-    @functools.lru_cache(maxsize=1)
-    def index_html():
-        with open(os.path.join(PORTAL, 'index.html'), encoding='utf-8') as f:
-            t = f.read()
-        scripts = re.findall(r'<script defer="defer" src="([^"]+)"></script>', t)
-        styles = re.findall(r'<link href="([^"]+\.css)" rel="stylesheet">', t)
-        css = ''.join(f"document.write('<link rel=\"stylesheet\" href=\"'+B+'{s}\">');" for s in styles)
-        js = ''.join(f"document.write('<script src=\"'+B+'{s}\"><\\/script>');" for s in scripts)
-        return ('<!doctype html><html lang="en"><head><meta charset="utf-8"/>'
-                '<meta name="viewport" content="width=device-width,initial-scale=1"/>'
-                f'<title>{title}</title><script>var L=location.pathname,I=L.lastIndexOf("/d2e/portal"),B=(I>=0?L.slice(0,I):L).replace(/\\/$/,"");'
-                "document.write('<base href=\"'+B+'/d2e/portal\"/><link rel=\"icon\" href=\"'+B+'/d2e/portal/assets/favicon.ico\"/>');"
-                "document.write('<script src=\"'+B+'/d2e/portal/env.js\"><\\/script><script src=\"'+B+'/d2e/portal/cells.js\"><\\/script>"
-                "<script src=\"'+B+'/d2e/portal/dark.js\"><\\/script>');"
-                f'{css}</script></head><body><noscript>You need to enable JavaScript to run this app.</noscript>'
-                f'<div id="root"></div><script>{js}</script></body></html>')
-
-    @app.get('/d2e/portal/cells.js')
-    def portal_cells():
-        return Response(cells.page_js(), media_type='application/javascript', headers={'Cache-Control': 'no-cache'})
-
-    @app.get('/d2e/portal/dark.js')
-    def portal_dark():
-        return FileResponse(os.path.join(STATIC, 'dark.js'), media_type='application/javascript',
-                            headers={'Cache-Control': 'no-cache'})
+        return RedirectResponse('atlas/', status_code=302)
 
     @app.get('/d2e/portal')
-    @app.get('/d2e/portal/')
-    def portal_index():
-        return Response(index_html(), media_type='text/html', headers={'Cache-Control': 'no-cache'})
-
     @app.get('/d2e/portal/{rel:path}')
-    def portal_file(rel: str):
-        r = _serve(PORTAL, rel, 'portal')
-        if r is not None:
-            return r
-        if re.search(r'\.\w{1,5}$', rel):
-            raise HTTPException(404)
-        return Response(index_html(), media_type='text/html', headers={'Cache-Control': 'no-cache'})
+    def old_portal(request: Request, rel: str = ''):
+        # D2E 0.18's portal (the first screens of this app): links to it land on the 0.19 screens
+        return RedirectResponse((request.scope.get('root_path') or '') + '/atlas/', status_code=302)
 
-    @app.get('/resources/concept-sets/{rel:path}')
-    def concept_sets_file(rel: str):
-        r = _serve(CONCEPT_SETS, rel, 'concept-sets')
-        if r is None:
-            raise HTTPException(404)
-        return r
-
-    @app.get('/mri/{rel:path}')
-    def mri_file(rel: str):
-        r = _serve(MRI, rel, 'mri')
-        if r is None:
-            raise HTTPException(404)
-        return r
-
+    # ---- D2E 0.19: ATLAS 3 is the shell, D2E's screens are its plugins -----------
     @app.get('/atlas')
     def atlas_root():
         return RedirectResponse('atlas/', status_code=302)
 
+    @functools.lru_cache(maxsize=1)
+    def atlas_index():
+        with open(os.path.join(D2E_ATLAS, 'index.html'), encoding='utf-8') as f:
+            t = f.read()
+        t = t.replace('href="/favicon.ico"', 'href="./config/d2e2.svg"').replace('<title>Atlas Cohort Builder</title>',
+                                                                               f'<title>{title}</title>')
+        # D2E's own head scripts (Logto sign-in guard, token refresh, portal account link) are not used here
+        t = re.sub(r'\s*<script src="\./(landing-redirect|login-guard|user-link|token-keeper|analysis-default)\.js">'
+                   r'</script>', '', t)
+        return t.replace('</head>', '<script src="./d2e.js"></script><script src="./cells.js"></script><script src="./dark.js"></script>\n</head>')
+
+    @app.get('/atlas/')
+    @app.get('/atlas/index.html')
+    def atlas_page():
+        return Response(atlas_index(), media_type='text/html', headers={'Cache-Control': 'no-cache'})
+
+    @app.get('/atlas/d2e.js')
+    def atlas_shim(request: Request):
+        user = viewer(request)
+        now = int(time.time())
+        token = jwt({'sub': user, 'username': user, 'name': user, 'iat': now, 'exp': now + 12 * 3600,
+                     'aud': 'https://alp-default', 'client_id': CLIENT_ID, 'roles': roles(), 'scope': ''})
+        only = next(iter(sources)) if len(sources) == 1 else None
+        js = """(function(){
+var L=location.pathname,I=L.lastIndexOf('/atlas/'),B=(I>=0?L.slice(0,I):'').replace(/\\/$/,''),O=location.origin;
+window.__D2E_BASE__=B;
+try{localStorage.setItem('bearerToken',%(token)s);localStorage.setItem('atlas_username',%(user)s);}catch(e){}
+var M=[['/analytics-svc/','/d2e/analytics-svc/'],['/system-portal/','/d2e/system-portal/'],['/usermgmt/','/d2e/usermgmt/'],
+ ['/d2e-webapi/','/d2e/d2e-webapi/'],['/jobplugins/','/d2e/jobplugins/'],
+ ['/hc/','/d2e/hc/'],['/d2e/','/d2e/'],['/WebAPI/','/WebAPI/'],['/atlas/','/atlas/'],['/resources/','/resources/']];
+function fix(u){if(typeof u!=='string')return u;var p=u;if(p.indexOf(O+'/')===0)p=p.slice(O.length);else if(p.charAt(0)!=='/'||p.charAt(1)==='/')return u;
+ if(B&&p.indexOf(B+'/')===0)return u;for(var i=0;i<M.length;i++)if(p.indexOf(M[i][0])===0)return O+B+M[i][1]+p.slice(M[i][0].length);return u;}
+var f=window.fetch;window.fetch=function(u,o){if(u&&typeof u==='object'&&u.url&&fix(u.url)!==u.url)u=new Request(fix(u.url),u);return f.call(this,typeof u==='string'?fix(u):u,o);};
+var x=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=fix(u);return x.apply(this,arguments);};
+var K=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)');
+if(K){K.addEventListener('change',function(){location.reload();});if(K.matches){var st=document.createElement('style');
+ st.textContent=':root{color-scheme:dark}html,body{background:#0a0a0a}img[src$="d2e2.svg"]{filter:brightness(0) invert(.92)}'
+ +'[style*="color: rgb(0, 0, 128)"]{color:#ededed!important}';document.head.appendChild(st);}}
+var q=window.fetch;window.fetch=function(u,o){if(typeof u==='string'&&/config\\/plugins\\.json$/.test(u)&&K&&K.matches)u+='?dark=1';return q.call(this,u,o);};
+var D=%(dataset)s,H=D?'#/datasources/'+encodeURIComponent(D)+'/plugin:datasources:datasource':'#/plugins/datasources/';
+if(D){var sp=document.createElement('style');sp.textContent='.datasources-view__source-picker,.explorations-page__dataset{display:none!important}';document.head.appendChild(sp);}
+function land(){var h=location.hash||'';if(h===''||h==='#'||h==='#/'||h==='#/welcome'||(D&&h==='#/plugins/datasources/'))location.replace(L+location.search+H);}
+land();window.addEventListener('hashchange',land);
+})();""" % {'token': json.dumps(token), 'user': json.dumps(user), 'dataset': json.dumps(only)}
+        return Response(js, media_type='application/javascript', headers={'Cache-Control': 'no-store'})
+
     @app.get('/atlas/config-local.json')
     def atlas_config():
         return {'api': {'url': '../WebAPI'}, 'userAuthenticationEnabled': False, 'enableSkipLogin': True,
-                'enablePermissionManagement': False, 'enablePersonCount': False, 'enableTaggingSection': False,
-                'authProviders': []}
+                'enablePermissionManagement': False, 'enablePersonCount': True, 'enableTaggingSection': False,
+                'enablePythia': False, 'authProviders': [], 'defaultLocale': 'en'}
+
+    @app.get('/atlas/config/plugins.json')
+    def atlas_plugins(dark: int = 0):
+        with open(os.path.join(D2E_ATLAS, 'config', 'plugins.json'), encoding='utf-8') as f:
+            m = json.load(f)
+        m['plugins'] = [p for p in m['plugins'] if p['id'] in ATLAS_PLUGINS]
+        th = m['settings']['theme']
+        # the theme follows the OS (d2e.js asks with ?dark=1), no toggle; in the dark, greys instead of D2E's navy
+        th.update(defaultMode='dark' if dark else 'light', enableDarkMode=False, logoUrl='./config/d2e2.svg',
+                  landingLogoUrl='./config/landing-page-illustration.svg')
+        if dark:
+            th.update(primaryColor='#d4d4d4', chartColors=['#a3a3a3' if c == '#000080' else c for c in th['chartColors']],
+                      treemapGradient=['#262626', '#737373', '#d4d4d4'])
+        m['settings']['header'].update(showLanguageSelector=False, showConfigButton=False)
+        # characterization, pathway, incidence rate and feature analyses are not in this WebAPI
+        m['settings']['navigation']['disabledCoreItems'] = ['datasources', 'analysis']
+        return m
+
+    @app.get('/atlas/plugins/datasource/style.css')
+    def atlas_datasource_css():
+        return Response('', media_type='text/css')  # the plugin asks for it; its build has none
+
+    @app.get('/atlas/dark.js')
+    def atlas_dark():
+        return FileResponse(os.path.join(STATIC, 'dark.js'), media_type='application/javascript',
+                            headers={'Cache-Control': 'no-cache'})
 
     @app.get('/atlas/cells.js')
     def atlas_cells():
@@ -328,43 +275,12 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
 
     @app.get('/atlas/{rel:path}')
     def atlas_file(rel: str):
-        path = os.path.normpath(os.path.join(ATLAS_STATIC, rel or 'index.html'))
-        if not path.startswith(ATLAS_STATIC) or not os.path.isfile(path):
-            path = os.path.join(ATLAS_STATIC, 'index.html')
-        return FileResponse(path)
-
-    # ---- stand-in OIDC -----------------------------------------------------------
-    @app.get('/oidc/auth')
-    def oidc_auth(request: Request, redirect_uri: str, state: str = '', nonce: str = ''):
-        code = _b64(json.dumps({'n': nonce, 'u': viewer(request)}).encode())
-        sep = '&' if '?' in redirect_uri else '?'
-        return RedirectResponse(f'{redirect_uri}{sep}' + urllib.parse.urlencode({'code': code, 'state': state}),
-                                status_code=302)
-
-    @app.post('/d2e/oauth/token')
-    async def oidc_token(request: Request):
-        form = {k: v[0] for k, v in urllib.parse.parse_qs((await request.body()).decode()).items()}
-        nonce = ''
-        if form.get('grant_type') == 'authorization_code':
-            try:
-                nonce = json.loads(_unb64(form.get('code', ''))).get('n', '')
-            except ValueError:
-                nonce = ''
-        user = viewer(request)
-        base = str(request.base_url).rstrip('/')
-        issuer = form.get('redirect_uri', base).split('/d2e/portal')[0] + '/oidc'
-        now = int(time.time())
-        common = {'sub': user, 'username': user, 'name': user, 'preferred_username': user, 'iss': issuer,
-                  'iat': now, 'exp': now + 3600}
-        id_token = jwt(dict(common, aud=form.get('client_id') or CLIENT_ID, nonce=nonce, email=None,
-                            email_verified=False))
-        access = jwt(dict(common, aud='https://alp-default', client_id=CLIENT_ID, roles=roles(), scope=''))
-        return {'access_token': access, 'id_token': id_token, 'refresh_token': _b64(secrets.token_bytes(24)),
-                'token_type': 'Bearer', 'expires_in': 3600, 'scope': 'openid offline_access profile email'}
-
-    @app.get('/oidc/session/end')
-    def oidc_end(redirect: str = '../d2e/portal'):
-        return RedirectResponse(redirect, status_code=302)
+        path = os.path.normpath(os.path.join(D2E_ATLAS, rel))
+        if not path.startswith(D2E_ATLAS + os.sep) or not os.path.isfile(path):
+            if re.search(r'\.\w{1,5}$', rel):
+                raise HTTPException(404)
+            return atlas_page()
+        return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
 
     # ---- system-portal -----------------------------------------------------------
     @app.get('/d2e/system-portal/feature/list')
@@ -416,6 +332,15 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
                 'alp_role_study_researcher': keys, 'alp_role_tenant_viewer': ['tenant'], 'alp_tenant_id': ['tenant'],
                 'alp_role_study_admin': [], 'alp_role_tenant_admin': []}
 
+    @app.get('/d2e/usermgmt/api/me')
+    def me(request: Request):
+        user = viewer(request)
+        return {'id': user, 'username': user, 'name': user}
+
+    @app.get('/d2e/usermgmt/api/me/roles')
+    def my_roles():
+        return {'datasetRoles': [{'datasetId': k, 'role': 'STUDY_RESEARCHER'} for k in sources]}
+
     @app.post('/d2e/usermgmt/api/me/sync-webapi-roles')
     def sync_roles():
         return {'ok': True}
@@ -466,62 +391,6 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
     @app.get('/d2e/jobplugins/analysisflow/list')
     def analysis_flows():
         return []
-
-    # ---- terminology (concept search facets and counts) --------------------------
-    def concept_filter(text, flt):
-        try:
-            flt = json.loads(flt or '{}')
-        except ValueError:
-            flt = {}
-        body = {'QUERY': text, 'DOMAIN_ID': flt.get('domainId') or [], 'VOCABULARY_ID': flt.get('vocabularyId') or [],
-                'CONCEPT_CLASS_ID': flt.get('conceptClassId') or []}
-        f = search_filters(body)
-        std = [x for x in flt.get('standardConcept') or [] if x in ('S', 'C')]
-        if std:
-            f += ' AND STANDARD_CONCEPT IN (%s)' % ','.join(q(x) for x in std)
-        valid = flt.get('validity') or []
-        if valid == ['Valid']:
-            f += ' AND INVALID_REASON IS NULL'
-        elif valid == ['Invalid']:
-            f += ' AND INVALID_REASON IS NOT NULL'
-        return f
-
-    @app.get('/d2e/terminology/concept/count')
-    def concept_count(datasetId: str, code: str = '', filter: str = ''):
-        s = src(datasetId)
-        rows = s.query_dicts('SELECT COUNT(*) AS n FROM @CDM_schema.concept WHERE 1 = 1 '
-                             + concept_filter(code, filter), CDM_schema=s.vocab_schema)
-        return int(rows[0]['n']) if rows else 0
-
-    @app.get('/d2e/terminology/concept/filter-options')
-    def concept_filter_options(datasetId: str, searchText: str = '', filter: str = ''):
-        s = src(datasetId)
-        out = {'conceptClassId': {}, 'domainId': {}, 'standardConcept': {}, 'vocabularyId': {}, 'validity': {},
-               'concept': {}}
-        rows = s.query_dicts(
-            'SELECT CONCEPT_CLASS_ID AS c, DOMAIN_ID AS d, COALESCE(STANDARD_CONCEPT, \'\') AS s, VOCABULARY_ID AS v, '
-            'CASE WHEN INVALID_REASON IS NULL THEN \'Valid\' ELSE \'Invalid\' END AS i, COUNT(*) AS n '
-            'FROM @CDM_schema.concept WHERE 1 = 1 ' + concept_filter(searchText, filter) + ' GROUP BY 1, 2, 3, 4, 5',
-            CDM_schema=s.vocab_schema)
-        for r in rows:
-            n = int(r['n'])
-            for k, col in (('conceptClassId', 'c'), ('domainId', 'd'), ('standardConcept', 's'),
-                           ('vocabularyId', 'v'), ('validity', 'i')):
-                out[k][r[col]] = out[k].get(r[col], 0) + n
-            kind = 'Standard' if r['s'] == 'S' else 'Non-standard'
-            out['concept'][kind] = out['concept'].get(kind, 0) + n
-        return {'filterOptions': out}
-
-    @app.post('/d2e/d2e-webapi/vocabulary/{key}/search')
-    async def d2e_search(key: str, request: Request, page: int = None, rowsPerPage: int = None):
-        s = src(key)
-        body = await request.json()
-        sql = sql_resource('vocabulary', 'search.sql').replace('@filters', search_filters(body))
-        if rowsPerPage:
-            sql += f'\nLIMIT {int(rowsPerPage)} OFFSET {int(page or 0) * int(rowsPerPage)}'
-        else:
-            sql += '\nLIMIT 20000'
-        return [concept_json(r) for r in s.query_dicts(sql, CDM_schema=s.vocab_schema)]
 
     # ---- analytics-svc: D2E's cohort builder -------------------------------------
     store = app.state.store
@@ -718,7 +587,7 @@ window.ENV_DATA={PUBLIC_URL:B+'/d2e/portal',REACT_APP_LOCALE:'',GIT_COMMIT:'',RE
             new = '/d2e/d2e-webapi/cohortdefinition-pa'     # the cohort builder's list, not the WebAPI's
             scope['path'] = (root + new) if scope['path'] != p else new
             scope['raw_path'] = scope['path'].encode()
-        elif p.startswith('/d2e/d2e-webapi/') and not re.match(r'^/d2e/d2e-webapi/vocabulary/[^/]+/search$', p):
+        elif p.startswith('/d2e/d2e-webapi/'):
             new = '/WebAPI/' + p[len('/d2e/d2e-webapi/'):]
             scope['path'] = (root + new) if scope['path'] != p else new
             scope['raw_path'] = scope['path'].encode()
