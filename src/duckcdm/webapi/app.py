@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..circe import CirceError, build_cohort_query, build_concept_set_query
 from ..sqlrender import render, translate
-from . import cells
+from . import analyses, cells
 from .reports import Reports
 from .sources import Source, like_text, q, q_in, sql_resource
 from .store import Store, now_ms
@@ -512,9 +512,11 @@ def create_app(sources, store, title='duckcdm', gateway=None):
                 else:
                     pc, rc = cur.execute(f'SELECT count(distinct subject_id), count(*) FROM {s.results_schema}.cohort '
                                          'WHERE cohort_definition_id = ?', [cid]).fetchone()
+                # the report goes with the generation: the source's result tables are shared by every viewer's store
+                report = json.dumps({str(m): build_report(cur, s.results_schema, cid, m) for m in (0, 1)})
             store.set_generation(cid, s.source_id, status='COMPLETE', is_valid=True,
                                  execution_duration=int((time.time() - t0) * 1000), person_count=pc, record_count=rc,
-                                 fail_message=None)
+                                 fail_message=None, report=report)
             store.finish_job(jid, 'COMPLETED', 'COMPLETED')
         except Exception as e:
             traceback.print_exc()
@@ -531,7 +533,7 @@ def create_app(sources, store, title='duckcdm', gateway=None):
                                                  'source_key': key, 'jobName': f'generating cohort {cid} : {key}',
                                                  'jobAuthor': store.user['login']})
         store.set_generation(cid, s.source_id, start_time=now_ms(), status='RUNNING', is_valid=False,
-                             is_canceled=False, fail_message=None, person_count=None, record_count=None)
+                             is_canceled=False, fail_message=None, person_count=None, record_count=None, report=None)
         # copy_context: the generation thread keeps this request's viewer identity (remote sources query as the viewer)
         threading.Thread(target=contextvars.copy_context().run, args=(run_generation, cid, s, jid), daemon=True).start()
         return store.job(jid)
@@ -550,8 +552,11 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     @app.get('/WebAPI/cohortdefinition/{cid}/report/{key}')
     def inclusion_report(cid: int, key, mode: int = 0):
         s = src(key)
-        cur = s.cursor()
-        rs = s.results_schema
+        rep = store.generation_report(cid, s.source_id, mode)
+        return rep if rep is not None else build_report(s.cursor(), s.results_schema, cid, mode)
+
+    def build_report(cur, rs, cid, mode):
+        """The inclusion report of one generation as the API shows it (small counts masked)."""
         row = cur.execute(f'select cs.base_count, cs.final_count, coalesce(cc.lost_count, 0) from {rs}.cohort_summary_stats cs '
                           f'left join {rs}.cohort_censor_stats cc on cc.cohort_definition_id = cs.cohort_definition_id '
                           'where cs.cohort_definition_id = ? and cs.mode_id = ?', [cid, mode]).fetchone()
@@ -599,6 +604,9 @@ def create_app(sources, store, title='duckcdm', gateway=None):
     def trexsql_status(key):
         return {'sourceKey': key, 'status': 'not_built', 'totalPatientCount': None, 'lastBuiltAt': None,
                 'sizeBytes': None, 'errorMessage': None}
+
+    # ---- analyses (characterization, pathways, incidence rates, feature analyses) ----
+    analyses.install(app, store, src)
 
     # ---- jobs --------------------------------------------------------------------
     @app.get('/WebAPI/job/execution')

@@ -3,9 +3,10 @@
 The CDM is read from the Data Foundation Tables dataset (DF_DATASET, default snuh_cdm) with the app's own
 permissions (DF_AUTH=app, the platform app token): viewers see counts without a grant on snuh_cdm of their own,
 and each query is logged with the viewer's ID.
-Cohort generation is folded into one SELECT and run there (duckcdm.webapi.remote). The app keeps no data
-of its own: concept sets and cohort definitions live in /tmp (lost when the pod restarts — export them as
-JSON from ATLAS), cohort results are recomputed by generating again.
+Cohort generation is folded into one SELECT and run there (duckcdm.webapi.remote). Concept sets, cohort
+definitions and analyses, with their (masked) results, are each viewer's own: kept in that viewer's drive under
+apps/cdm-atlas/ (duckcdm.webapi.drive — the platform rule for what an app keeps for a user), loaded into memory
+the first time they open the app.
 The engine is not named to users: WebAPI build name, source dialect label, no API docs pages.
 """
 import os
@@ -19,14 +20,15 @@ os.environ.setdefault('DF_PURPOSE', '')
 
 from fastapi.responses import PlainTextResponse
 
+from duckcdm.webapi import drive
 from duckcdm.webapi.app import create_app
 from duckcdm.webapi.remote import RemoteSource, install_identity
-from duckcdm.webapi.store import Store
 
 source = RemoteSource(1, os.environ.get('SOURCE_KEY', 'SNUH'), os.environ.get('SOURCE_NAME', 'SNUH CDM'))
-store = Store(os.environ.get('STORE_PATH', '/tmp/cdm-atlas-store.duckdb'), user='atlas')
+store = drive.from_env(user='atlas')
 app = create_app([source], store, title='CDM ATLAS')
 install_identity(app)
+drive.install(app, store)
 # no FastAPI documentation pages (they list the server internals)
 app.router.routes = [r for r in app.router.routes if getattr(r, 'path', '') not in ('/docs', '/redoc', '/openapi.json', '/docs/oauth2-redirect')]
 app.openapi_url = app.docs_url = app.redoc_url = None
