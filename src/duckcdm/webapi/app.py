@@ -27,12 +27,18 @@ INVALID_CAPTION = {'V': 'Valid', 'D': 'Invalid', 'U': 'Invalid'}
 
 
 def _ms(d):
+    """date / datetime -> milliseconds since the epoch (UTC). calendar.timegm instead of time.mktime /
+    naive timestamp(): on Windows those raise OverflowError / OSError for dates before 1970, which vocabulary
+    valid_start_date values often are."""
     if d is None:
         return None
-    if hasattr(d, 'timestamp'):
-        return int(d.timestamp() * 1000)
+    import calendar
     import datetime
-    return int(time.mktime(datetime.datetime(d.year, d.month, d.day).timetuple()) * 1000)
+    if isinstance(d, datetime.datetime):
+        if d.tzinfo is not None:
+            return int(d.timestamp() * 1000)
+        return calendar.timegm(d.timetuple()) * 1000 + d.microsecond // 1000
+    return calendar.timegm((d.year, d.month, d.day, 0, 0, 0)) * 1000
 
 
 def concept_json(r):

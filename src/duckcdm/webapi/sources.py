@@ -83,8 +83,18 @@ class Source:
         return cols, cur.fetchall()
 
     def query_dicts(self, sql, **params):
+        """Rows as dicts. DuckDB returns column names in the case the table stores them, so a CDM created with
+        lower-case column names (the CommonDataModel DDL default) would not match the upper-case keys the WebAPI
+        code reads; every key is therefore also present in upper case."""
         cols, rows = self.query(sql, **params)
-        return [dict(zip(cols, r)) for r in rows]
+        upper = [(c, c.upper()) for c in cols if c.upper() != c]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            for c, u in upper:
+                d.setdefault(u, d[c])
+            out.append(d)
+        return out
 
     # -- results schema
     def init_results(self):

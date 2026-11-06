@@ -1,4 +1,5 @@
 """Data source reports (port of WebAPI CDMResultsAnalysisRunner): Achilles results -> the JSON the ATLAS UI expects."""
+import calendar
 import datetime
 import decimal
 import os
@@ -22,9 +23,11 @@ def _json_value(v):
     if isinstance(v, decimal.Decimal):
         return float(v)
     if isinstance(v, datetime.datetime):
-        return int(v.timestamp() * 1000)
+        if v.tzinfo is not None:
+            return int(v.timestamp() * 1000)
+        return calendar.timegm(v.timetuple()) * 1000 + v.microsecond // 1000   # works before 1970 on Windows too
     if isinstance(v, datetime.date):
-        return int(datetime.datetime(v.year, v.month, v.day).timestamp() * 1000)
+        return calendar.timegm((v.year, v.month, v.day, 0, 0, 0)) * 1000
     return v
 
 
